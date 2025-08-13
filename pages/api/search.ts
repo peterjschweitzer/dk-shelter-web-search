@@ -245,7 +245,11 @@ async function fetchBookedDatesFlex(
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
     // TEMP DEBUG
-    const debugPlaces = await fetchAllPlaces();
+    const start = req.query.start as string || "2025-09-07";
+    const nights = parseInt(req.query.nights as string || "1", 10);
+    const region = (req.query.region as string) || "";
+
+    const debugPlaces = await fetchAllPlaces(start, nights, region);
     const first = debugPlaces.find(p => p.url.includes("aaby-skoven")) || debugPlaces[0];
     console.log("Testing place:", first);
 
@@ -264,6 +268,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(500).json({ error: e?.message || "server error" });
   }
 }
+
 
 //  try {
 //    const start = String(req.query.start || "");
