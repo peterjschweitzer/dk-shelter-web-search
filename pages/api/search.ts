@@ -20,6 +20,7 @@ const BOOK = `${BASE}/includes/branding_files/shelterbooking/includes/inc_ajaxge
 // Category/type ids (NOT real place ids)
 const TYPE_IDS = new Set([3012, 3031, 3091]);
 
+// Region presets (lat_min, lat_max, lon_min, lon_max)
 const PRESETS: Record<string, [number, number, number, number]> = {
   "sjælland": [54.60, 55.95, 11.00, 12.80],
   fyn: [55.0, 55.6, 9.6, 10.8],
@@ -30,6 +31,7 @@ const PRESETS: Record<string, [number, number, number, number]> = {
   amager: [55.55, 55.75, 12.45, 12.75],
 };
 
+// ASCII/english aliases -> canonical preset key
 const ALIAS: Record<string, string> = {
   sjaelland: "sjælland", zealand: "sjælland", sjalland: "sjælland",
   fyn: "fyn", funen: "fyn",
@@ -54,14 +56,17 @@ async function getJSON(url: string, params: Record<string, string>) {
   const r = await fetch(u, {
     headers: {
       "User-Agent": "Mozilla/5.0",
-      Accept: "application/json, text/javascript, */*;q=0.1",
+      "Accept": "application/json, text/javascript, */*;q=0.1",
+      "Accept-Language": "da-DK,da;q=0.9,en-US;q=0.8",
+      "Cache-Control": "no-cache",
+      "Pragma": "no-cache",
       "X-Requested-With": "XMLHttpRequest",
-      Referer: `${BASE}/soeg/?s1=3012`,
+      "Referer": `${BASE}/soeg/?s1=3012`,
     },
   });
   if (!r.ok) throw new Error(`${r.status} on ${u}`);
   const text = await r.text();
-  return JSON.parse(text); // endpoint sometimes returns text/html with JSON body
+  return JSON.parse(text); // returns JSON but sometimes with text/html content-type
 }
 
 async function fetchAllPlaces(): Promise<Place[]> {
@@ -94,14 +99,23 @@ async function fetchAllPlaces(): Promise<Place[]> {
 
 async function fetchDetailHTML(url: string) {
   const u = url.endsWith("/") ? url : url + "/";
-  const r = await fetch(u, { headers: { "User-Agent": "Mozilla/5.0" } });
-  if (!r.ok) throw new Error(`Detail ${r.status}`);
+  const r = await fetch(u, {
+    headers: {
+      "User-Agent": "Mozilla/5.0",
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "da-DK,da;q=0.9,en-US;q=0.8",
+      "Cache-Control": "no-cache",
+    },
+    redirect: "follow",
+  });
+  if (!r.ok) throw new Error(`Detail ${r.status} for ${u}`);
   return r.text();
 }
 function extractId(html: string): number | null {
-  const m = html.match(/inc_ajaxgetbookingsforsingleplace\.asp\?i=(\d+)/i)
-        || html.match(/data-place-id\s*=\s*"(\d+)"/i)
-        || html.match(/[?&]i=(\d+)/i);
+  const m =
+    html.match(/inc_ajaxgetbookingsforsingleplace\.asp\?i=(\d+)/i) ||
+    html.match(/data-place-id\s*=\s*"(\d+)"/i) ||
+    html.match(/[?&]i=(\d+)/i);
   const id = m ? Number(m[1]) : NaN;
   return Number.isFinite(id) && !TYPE_IDS.has(id) ? id : null;
 }
@@ -118,10 +132,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const nights = Math.max(1, Number(req.query.nights || 1));
     const regions = ([] as string[]).concat(req.query.region || []).filter(Boolean) as string[];
     const maxPlaces = Math.max(0, Number(req.query.maxPlaces || 0));
+    const debug = String(req.query.debug || "") === "1";
 
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(start)) return res.status(400).json({ error: "start must be YYYY-MM-DD" });
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(start)) {
+      return res.status(400).json({ error: "start must be YYYY-MM-DD" });
+    }
 
-    // list of dates we require free
+    // required-free dates
     const needs: string[] = [];
     const base = new Date(start + "T00:00:00Z");
     for (let i = 0; i < nights; i++) {
@@ -131,7 +148,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const yyyymmdd = start.replace(/-/g, "");
 
     // 1) list all places
-    let places = await fetchAllPlaces();
+    const allPlaces = await fetchAllPlaces();
+    let places = allPlaces;
 
     // 2) region filter via bounding boxes
     const keys = regions.map(resolveRegionName).filter(Boolean) as string[];
@@ -150,33 +168,64 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     if (maxPlaces > 0) places = places.slice(0, maxPlaces);
 
     // 3) resolve missing per-place ids by scraping
+    let hadPid = places.filter(p => p.place_id).length;
+    let resolved = 0;
     for (const p of places) {
       if (!p.place_id) {
         try {
           const html = await fetchDetailHTML(p.url);
           const id = extractId(html);
-          if (id) p.place_id = id;
-        } catch {}
-        await new Promise(r => setTimeout(r, 50));
+          if (id) {
+            p.place_id = id;
+            resolved++;
+          }
+        } catch (err: any) {
+          // swallow but keep note in debug
+          if (debug) console.error("detail-error", p.url, err?.message || err);
+        }
+        await new Promise(r => setTimeout(r, 60));
       }
     }
 
+    const withPid = places.filter(p => p.place_id).length;
+
     // 4) availability
     const available: any[] = [];
+    let availChecked = 0, availErrors = 0;
     for (const p of places) {
       if (!p.place_id) continue;
       try {
         const booked = await fetchBookedDates(p.place_id, yyyymmdd);
+        availChecked++;
         const overlaps = needs.some(d => booked.has(d));
         if (!overlaps) {
           available.push({ lat: p.lat, lng: p.lng, region: p.region, name: p.title, url: p.url, place_id: p.place_id });
         }
-      } catch {}
+      } catch (e: any) {
+        availErrors++;
+        if (debug) console.error("bookings-error", p.place_id, e?.message || e);
+      }
       await new Promise(r => setTimeout(r, 80));
     }
 
+    const payload: any = { count: available.length, items: available };
+    if (debug) {
+      payload.debug = {
+        totalFetched: allPlaces.length,
+        afterRegionFilter: places.length,
+        hadPlaceIdInitially: hadPid,
+        resolvedPlaceIds: resolved,
+        finalWithPlaceId: withPid,
+        availChecked,
+        availErrors,
+        sample: places.slice(0, 5).map(p => ({
+          title: p.title, url: p.url, place_id: p.place_id, lat: p.lat, lng: p.lng, region: p.region
+        })),
+      };
+    }
+
     res.setHeader("Cache-Control", "no-store");
-    return res.status(200).json({ count: available.length, items: available });
+    return res.status(200).json(payload);
   } catch (e: any) {
     return res.status(500).json({ error: e?.message || "server error" });
   }
