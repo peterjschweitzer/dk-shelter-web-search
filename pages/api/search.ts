@@ -97,28 +97,50 @@ async function fetchAllPlaces(): Promise<Place[]> {
   return out;
 }
 
-async function fetchDetailHTML(url: string) {
-  const u = url.endsWith("/") ? url : url + "/";
-  const r = await fetch(u, {
-    headers: {
-      "User-Agent": "Mozilla/5.0",
-      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "Accept-Language": "da-DK,da;q=0.9,en-US;q=0.8",
-      "Cache-Control": "no-cache",
-    },
-    redirect: "follow",
-  });
-  if (!r.ok) throw new Error(`Detail ${r.status} for ${u}`);
-  return r.text();
+// 1) Beefier HTML fetch: try trailing slash AND '?noheadfoot=true'
+async function fetchDetailHTMLAll(url: string): Promise<string | null> {
+  const candidates = [
+    url.endsWith("/") ? url : url + "/",
+    (url.endsWith("/") ? url : url + "/") + "?noheadfoot=true",
+  ];
+  for (const u of candidates) {
+    const r = await fetch(u, {
+      headers: {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "da-DK,da;q=0.9,en-US;q=0.8",
+        "Cache-Control": "no-cache",
+      },
+      redirect: "follow",
+    });
+    if (r.ok) {
+      const html = await r.text();
+      if (html && html.length > 500) return html;
+    }
+  }
+  return null;
 }
+
+// 2) Broader id extraction (covers several markup patterns)
 function extractId(html: string): number | null {
-  const m =
-    html.match(/inc_ajaxgetbookingsforsingleplace\.asp\?i=(\d+)/i) ||
-    html.match(/data-place-id\s*=\s*"(\d+)"/i) ||
-    html.match(/[?&]i=(\d+)/i);
-  const id = m ? Number(m[1]) : NaN;
-  return Number.isFinite(id) && !TYPE_IDS.has(id) ? id : null;
+  const rgx = [
+    /inc_ajaxgetbookingsforsingleplace\.asp\?i=(\d+)/i,
+    /data-place-id\s*=\s*"(\d+)"/i,
+    /data-placeid\s*=\s*"(\d+)"/i,
+    /["'\s]place[_\s-]*id["']?\s*[:=]\s*"?(\d+)"?/i,
+    /\bplaceId\s*[:=]\s*(\d+)/i,
+    /[?&]i=(\d+)/i,
+  ];
+  for (const re of rgx) {
+    const m = html.match(re);
+    if (m) {
+      const id = Number(m[1]);
+      if (Number.isFinite(id) && ![3012,3031,3091].includes(id)) return id;
+    }
+  }
+  return null;
 }
+
 
 async function fetchBookedDates(id: number, yyyymmdd: string): Promise<Set<string>> {
   const data = await getJSON(BOOK, { i: String(id), d: yyyymmdd });
