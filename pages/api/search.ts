@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 type Place = {
   title: string;
   url: string;
-  place_id: number | null; // may be null; we use slug by default
+  place_id: number | null; // we primarily use slug now
   lat: number | null;
   lng: number | null;
   region: string;
@@ -17,7 +17,7 @@ const BASE = "https://book.naturstyrelsen.dk";
 const LIST = `${BASE}/includes/branding_files/shelterbooking/includes/inc_ajaxbookingplaces.asp`;
 const BOOK = `${BASE}/includes/branding_files/shelterbooking/includes/inc_ajaxgetbookingsforsingleplace.asp`;
 
-// These are category/type ids (NOT real per-place ids)
+// Category/type ids (NOT real per-place ids)
 const TYPE_IDS = new Set([3012, 3031, 3091]);
 
 // Region presets (lat_min, lat_max, lon_min, lon_max)
@@ -142,45 +142,59 @@ function slugFromUrl(url: string) {
   return m ? m[1] : null;
 }
 
-// Primary availability fetch: use slug (u=<slug>)
-async function fetchBookedDatesBySlug(slug: string, yyyymmdd: string, jar: CookieJar)
-: Promise<{ ok: boolean; dates?: Set<string> }> {
+// Build YYYYMM01 (first day of start month) for bookings endpoint
+function monthParamFromStart(start: string): string {
+  const dt = new Date(start + "T00:00:00Z");
+  const y = dt.getUTCFullYear().toString().padStart(4, "0");
+  const m = (dt.getUTCMonth() + 1).toString().padStart(2, "0");
+  return `${y}${m}01`;
+}
+
+// Make a Set of booked dates from payload (union of BookingDates & PartialBookingDates)
+function toBookedSet(data: any): Set<string> {
+  const full = Array.isArray(data?.BookingDates) ? data.BookingDates : [];
+  const partial = Array.isArray(data?.PartialBookingDates) ? data.PartialBookingDates : [];
+  const all = [...full, ...partial].map((s: any) => String(s));
+  return new Set(all);
+}
+
+// Primary availability fetch: use slug (u=<slug>) with month param
+async function fetchBookedDatesBySlug(slug: string, yyyymm01: string, jar: CookieJar)
+: Promise<{ ok: boolean; dates?: Set<string>; raw?: any }> {
   const headers = {
     "User-Agent": "Mozilla/5.0",
     "Accept": "application/json, text/javascript, */*;q=0.1",
     "X-Requested-With": "XMLHttpRequest",
     "Referer": `${BASE}/soeg/?s1=3012`,
   };
-  const u = `${BOOK}?` + new URLSearchParams({ u: slug, d: yyyymmdd }).toString();
+  const u = `${BOOK}?` + new URLSearchParams({ u: slug, d: yyyymm01 }).toString();
   const r = await fetchWithJar(u, { headers }, jar);
   if (!r.ok) return { ok: false };
   const text = await r.text();
   try {
     const data = JSON.parse(text);
-    const arr = Array.isArray(data?.BookingDates) ? data.BookingDates : [];
-    return { ok: true, dates: new Set(arr.map((s: any) => String(s))) };
+    return { ok: true, dates: toBookedSet(data), raw: data };
   } catch {
     return { ok: false };
   }
 }
 
 // Optional fallback: if a numeric place_id exists, try it second
-async function fetchBookedDatesById(id: number, yyyymmdd: string, jar: CookieJar)
-: Promise<{ ok: boolean; dates?: Set<string> }> {
+async function fetchBookedDatesById(id: number, yyyymm01: string, jar: CookieJar)
+: Promise<{ ok: boolean; dates?: Set<string>; raw?: any }> {
   const headers = {
     "User-Agent": "Mozilla/5.0",
     "Accept": "application/json, text/javascript, */*;q=0.1",
     "X-Requested-With": "XMLHttpRequest",
     "Referer": `${BASE}/soeg/?s1=3012`,
   };
-  const u = `${BOOK}?` + new URLSearchParams({ i: String(id), d: yyyymmdd }).toString();
+  const u = `${BOOK}?` + new URLSearchParams({ i: String(id), d: yyyymm01 }).toString();
   const r = await fetchWithJar(u, { headers }, jar);
   if (!r.ok) return { ok: false };
   const text = await r.text();
   try {
     const data = JSON.parse(text);
-    const arr = Array.isArray(data?.BookingDates) ? data.BookingDates : [];
-    return { ok: true, dates: new Set(arr.map((s: any) => String(s))) };
+    return { ok: true, dates: toBookedSet(data), raw: data };
   } catch {
     return { ok: false };
   }
@@ -224,9 +238,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       let slugProbe: any = null;
       if (slug) {
         try {
-          const probe = await fetchBookedDatesBySlug(slug, "20250907", jar);
+          const probe = await fetchBookedDatesBySlug(slug, "20250901", jar);
           slugProbe = probe.ok
-            ? { ok: true, datesCount: probe.dates!.size, sample: Array.from(probe.dates!).slice(0, 5) }
+            ? { ok: true, datesCount: probe.dates!.size, sample: Array.from(probe.dates!).slice(0, 5), rawKeys: Object.keys(probe.raw || {}) }
             : { ok: false };
         } catch (e: any) {
           slugProbe = { error: e?.message || String(e) };
@@ -247,14 +261,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(400).json({ error: "start must be YYYY-MM-DD" });
     }
 
-    // Build required-free dates
+    // Build required-free dates for the specific stay
     const needs: string[] = [];
     const base = new Date(start + "T00:00:00Z");
     for (let i = 0; i < nights; i++) {
       const d = new Date(base); d.setUTCDate(d.getUTCDate() + i);
       needs.push(d.toISOString().slice(0, 10));
     }
-    const yyyymmdd = start.replace(/-/g, "");
+
+    // IMPORTANT: the bookings endpoint wants the *month* (YYYYMM01)
+    const monthParam = monthParamFromStart(start);
 
     // 1) list all places
     const allPlaces = await fetchAllPlaces(jar);
@@ -283,13 +299,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     for (const p of places) {
       const slug = slugFromUrl(p.url);
       let got = { ok: false, dates: undefined as Set<string> | undefined };
+
       try {
         if (slug) {
-          const r1 = await fetchBookedDatesBySlug(slug, yyyymmdd, jar);
+          const r1 = await fetchBookedDatesBySlug(slug, monthParam, jar);
           if (r1.ok) { got = { ok: true, dates: r1.dates! }; usedSlug++; }
         }
         if (!got.ok && p.place_id) {
-          const r2 = await fetchBookedDatesById(p.place_id, yyyymmdd, jar);
+          const r2 = await fetchBookedDatesById(p.place_id, monthParam, jar);
           if (r2.ok) { got = { ok: true, dates: r2.dates! }; usedId++; }
         }
       } catch {
@@ -319,6 +336,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       payload.debug = {
         totalFetched: allPlaces.length,
         afterRegionFilter: places.length,
+        monthParam,
+        needs,
         availChecked,
         availErrors,
         usedSlug,
