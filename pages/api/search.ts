@@ -31,7 +31,6 @@ const PRESETS: Record<string, [number, number, number, number]> = {
   amager: [55.55, 55.75, 12.45, 12.75],
 };
 
-// ASCII/english aliases -> canonical preset key
 const ALIAS: Record<string, string> = {
   sjaelland: "sjælland", zealand: "sjælland", sjalland: "sjælland",
   fyn: "fyn", funen: "fyn",
@@ -65,8 +64,8 @@ async function getJSON(url: string, params: Record<string, string>) {
     },
   });
   if (!r.ok) throw new Error(`${r.status} on ${u}`);
-  const text = await r.text();
-  return JSON.parse(text); // returns JSON but sometimes with text/html content-type
+  const text = await r.text(); // sometimes served as text/html
+  return JSON.parse(text);
 }
 
 async function fetchAllPlaces(): Promise<Place[]> {
@@ -92,16 +91,17 @@ async function fetchAllPlaces(): Promise<Place[]> {
       });
     }
     if (rows.length < 200) break;
-    await new Promise(r => setTimeout(r, 120));
+    await new Promise(r => setTimeout(r, 120)); // polite
   }
   return out;
 }
 
-// 1) Beefier HTML fetch: try trailing slash AND '?noheadfoot=true'
+/** Try multiple variants to get the real page markup. */
 async function fetchDetailHTMLAll(url: string): Promise<string | null> {
+  const base = url.endsWith("/") ? url : url + "/";
   const candidates = [
-    url.endsWith("/") ? url : url + "/",
-    (url.endsWith("/") ? url : url + "/") + "?noheadfoot=true",
+    base,
+    base + "?noheadfoot=true",
   ];
   for (const u of candidates) {
     const r = await fetch(u, {
@@ -121,9 +121,9 @@ async function fetchDetailHTMLAll(url: string): Promise<string | null> {
   return null;
 }
 
-// 2) Broader id extraction (covers several markup patterns)
+/** Broader patterns: covers multiple ways the ID may be embedded. */
 function extractId(html: string): number | null {
-  const rgx = [
+  const patterns = [
     /inc_ajaxgetbookingsforsingleplace\.asp\?i=(\d+)/i,
     /data-place-id\s*=\s*"(\d+)"/i,
     /data-placeid\s*=\s*"(\d+)"/i,
@@ -131,11 +131,11 @@ function extractId(html: string): number | null {
     /\bplaceId\s*[:=]\s*(\d+)/i,
     /[?&]i=(\d+)/i,
   ];
-  for (const re of rgx) {
+  for (const re of patterns) {
     const m = html.match(re);
     if (m) {
       const id = Number(m[1]);
-      if (Number.isFinite(id) && ![3012,3031,3091].includes(id)) return id;
+      if (Number.isFinite(id) && !TYPE_IDS.has(id)) return id;
     }
   }
   return null;
@@ -146,44 +146,43 @@ function slugFromUrl(url: string) {
   return m ? m[1] : null;
 }
 
+/** Try numeric place_id first; if missing/fails, try slug fallback. */
 async function fetchBookedDatesFlex(place: { place_id: number | null; url: string }, yyyymmdd: string): Promise<Set<string>> {
   const headers = {
     "User-Agent": "Mozilla/5.0",
-    Accept: "application/json, text/javascript, */*;q=0.1",
+    "Accept": "application/json, text/javascript, */*;q=0.1",
     "X-Requested-With": "XMLHttpRequest",
-    Referer: `${BASE}/soeg/?s1=3012`,
+    "Referer": `${BASE}/soeg/?s1=3012`,
   };
 
-  // Try numeric place_id first
+  // 1) numeric id
   if (place.place_id) {
     const u = `${BOOK}?` + new URLSearchParams({ i: String(place.place_id), d: yyyymmdd }).toString();
     const r = await fetch(u, { headers });
     if (r.ok) {
       const text = await r.text();
-      const data = JSON.parse(text);
-      return new Set((data?.BookingDates ?? []).map((s: any) => String(s)));
+      try {
+        const data = JSON.parse(text);
+        return new Set((data?.BookingDates ?? []).map((s: any) => String(s)));
+      } catch {}
     }
   }
 
-  // Fallback to slug if no ID or failed
+  // 2) slug fallback
   const slug = slugFromUrl(place.url);
   if (slug) {
     const u2 = `${BOOK}?` + new URLSearchParams({ u: slug, d: yyyymmdd }).toString();
     const r2 = await fetch(u2, { headers });
     if (r2.ok) {
       const text2 = await r2.text();
-      const data2 = JSON.parse(text2);
-      return new Set((data2?.BookingDates ?? []).map((s: any) => String(s)));
+      try {
+        const data2 = JSON.parse(text2);
+        return new Set((data2?.BookingDates ?? []).map((s: any) => String(s)));
+      } catch {}
     }
   }
 
   return new Set();
-}
-
-async function fetchBookedDates(id: number, yyyymmdd: string): Promise<Set<string>> {
-  const data = await getJSON(BOOK, { i: String(id), d: yyyymmdd });
-  const arr = data?.BookingDates ?? [];
-  return new Set(arr.map((s: any) => String(s)));
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -227,7 +226,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     if (maxPlaces > 0) places = places.slice(0, maxPlaces);
 
-    // 3) resolve missing per-place ids by scraping
+    // 3) resolve missing per-place ids by scraping (more robust)
     let hadPid = places.filter(p => p.place_id).length;
     let resolved = 0;
     for (const p of places) {
@@ -235,27 +234,22 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         try {
           const html = await fetchDetailHTMLAll(p.url);
           const id = html ? extractId(html) : null;
-          if (id) {
-            p.place_id = id;
-            resolved++;
-          }
+          if (id) { p.place_id = id; resolved++; }
         } catch (err: any) {
-          // swallow but keep note in debug
           if (debug) console.error("detail-error", p.url, err?.message || err);
         }
         await new Promise(r => setTimeout(r, 60));
       }
     }
-
     const withPid = places.filter(p => p.place_id).length;
 
-    // 4) availability
+    // 4) availability using flexible fetch
     const available: any[] = [];
     let availChecked = 0, availErrors = 0;
     for (const p of places) {
-      if (!p.place_id) continue;
       try {
         const booked = await fetchBookedDatesFlex(p, yyyymmdd);
+        // If we got ANY data back, count it as checked (even if empty)
         availChecked++;
         const overlaps = needs.some(d => booked.has(d));
         if (!overlaps) {
