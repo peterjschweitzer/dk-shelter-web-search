@@ -244,15 +244,37 @@ async function fetchBookedDatesFlex(
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
-    const start = String(req.query.start || "");
-    const nights = Math.max(1, Number(req.query.nights || 1));
-    const regions = ([] as string[]).concat(req.query.region || []).filter(Boolean) as string[];
-    const maxPlaces = Math.max(0, Number(req.query.maxPlaces || 0));
-    const debug = String(req.query.debug || "") === "1";
+    // TEMP DEBUG
+    const debugPlaces = await fetchAllPlaces();
+    const first = debugPlaces.find(p => p.url.includes("aaby-skoven")) || debugPlaces[0];
+    console.log("Testing place:", first);
 
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(start)) {
-      return res.status(400).json({ error: "start must be YYYY-MM-DD" });
-    }
+    const html = await fetchDetailHTML(first.url);
+    console.log("HTML snippet:", html.slice(0, 500)); // first 500 chars of HTML
+    console.log("Regex match:", extractId(html));
+
+    return res.status(200).json({
+      debug: {
+        testing: first.url,
+        htmlSnippet: html.slice(0, 500),
+        extractedId: extractId(html)
+      }
+    });
+  } catch (e: any) {
+    return res.status(500).json({ error: e?.message || "server error" });
+  }
+}
+
+//  try {
+//    const start = String(req.query.start || "");
+//    const nights = Math.max(1, Number(req.query.nights || 1));
+//    const regions = ([] as string[]).concat(req.query.region || []).filter(Boolean) as string[];
+//    const maxPlaces = Math.max(0, Number(req.query.maxPlaces || 0));
+//    const debug = String(req.query.debug || "") === "1";
+//
+//    if (!/^\d{4}-\d{2}-\d{2}$/.test(start)) {
+//      return res.status(400).json({ error: "start must be YYYY-MM-DD" });
+//    }
 
     // POLITE WARM-UP (sets cookies)
     const jar = new CookieJar();
