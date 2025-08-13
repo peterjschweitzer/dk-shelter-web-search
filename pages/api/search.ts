@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 type Place = {
   title: string;
   url: string;
-  place_id: number | null; // we primarily use slug now
+  place_id: number | null; // resolved numeric id (from detail page)
   lat: number | null;
   lng: number | null;
   region: string;
@@ -20,7 +20,7 @@ const BOOK = `${BASE}/includes/branding_files/shelterbooking/includes/inc_ajaxge
 // Category/type ids (NOT real per-place ids)
 const TYPE_IDS = new Set([3012, 3031, 3091]);
 
-// Region presets (lat_min, lat_max, lon_min, lon_max)
+// ---------------- Region presets (lat_min, lat_max, lon_min, lon_max)
 const PRESETS: Record<string, [number, number, number, number]> = {
   "sjælland": [54.60, 55.95, 11.00, 12.80],
   fyn: [55.0, 55.6, 9.6, 10.8],
@@ -51,7 +51,7 @@ function resolveRegionName(q: string) {
   return ALIAS[n] ?? null;
 }
 
-/* ---------------- Cookie jar (no external deps) ---------------- */
+// ---------------- Simple cookie jar (no deps)
 class CookieJar {
   private jar = new Map<string, string>();
   addFromSetCookieLine(line: string) {
@@ -65,10 +65,9 @@ class CookieJar {
     }
   }
   addFromResponse(res: Response) {
-    const all = res.headers.get("set-cookie");
-    if (!all) return;
-    // Split multiple Set-Cookie headers if coalesced
-    const parts = all.split(/,(?=[^ ;]+=)/);
+    const raw = res.headers.get("set-cookie");
+    if (!raw) return;
+    const parts = raw.split(/,(?=[^ ;]+=)/); // split multiple
     for (const p of parts) this.addFromSetCookieLine(p);
   }
   header(): string | undefined {
@@ -86,10 +85,27 @@ async function fetchWithJar(url: string, init: RequestInit, jar: CookieJar, coll
   return res;
 }
 
-/* ---------------- Data fetchers ---------------- */
+// ---------------- Helpers
+function slugFromUrl(url: string) {
+  const m = url.match(/\/sted\/([^/]+)\//i);
+  return m ? m[1] : null;
+}
 
-// JSON helper (handles the site returning text/html with JSON content)
-async function getJSON(url: string, params: Record<string, string>, jar?: CookieJar) {
+function monthParamFromStart(start: string): string {
+  const dt = new Date(start + "T00:00:00Z");
+  const y = dt.getUTCFullYear().toString().padStart(4, "0");
+  const m = (dt.getUTCMonth() + 1).toString().padStart(2, "0");
+  return `${y}${m}01`;
+}
+
+function toBookedSet(data: any): Set<string> {
+  const full = Array.isArray(data?.BookingDates) ? data.BookingDates : [];
+  const partial = Array.isArray(data?.PartialBookingDates) ? data.PartialBookingDates : [];
+  const all = [...full, ...partial].map((s: any) => String(s));
+  return new Set(all);
+}
+
+async function getJSON(url: string, params: Record<string, string>, jar: CookieJar) {
   const u = url + "?" + new URLSearchParams(params).toString();
   const baseHeaders = {
     "User-Agent": "Mozilla/5.0",
@@ -100,15 +116,12 @@ async function getJSON(url: string, params: Record<string, string>, jar?: Cookie
     "X-Requested-With": "XMLHttpRequest",
     "Referer": `${BASE}/soeg/?s1=3012`,
   } as Record<string, string>;
-  const res = jar
-    ? await fetchWithJar(u, { headers: baseHeaders }, jar)
-    : await fetch(u, { headers: baseHeaders });
+  const res = await fetchWithJar(u, { headers: baseHeaders }, jar);
   if (!res.ok) throw new Error(`${res.status} on ${u}`);
   const text = await res.text();
   return JSON.parse(text);
 }
 
-// Fetch all places via public list API
 async function fetchAllPlaces(jar: CookieJar): Promise<Place[]> {
   const out: Place[] = [];
   for (let p = 1; p <= 500; p++) {
@@ -123,7 +136,7 @@ async function fetchAllPlaces(jar: CookieJar): Promise<Place[]> {
       const lat = Number(c.DoubleLat ?? c.Lat ?? NaN);
       const lng = Number(c.DoubleLng ?? c.Lng ?? NaN);
       out.push({
-        title: c.Title || uri.replace(/-/g, " ").replace(/\b\w/g, (m: string) => m.toUpperCase()),
+        title: c.Title || uri,
         url: `${BASE}/sted/${uri}/`,
         place_id: Number.isFinite(placeId) ? placeId : null,
         lat: Number.isFinite(lat) ? lat : null,
@@ -137,51 +150,24 @@ async function fetchAllPlaces(jar: CookieJar): Promise<Place[]> {
   return out;
 }
 
-function slugFromUrl(url: string) {
-  const m = url.match(/\/sted\/([^/]+)\//i);
-  return m ? m[1] : null;
+async function fetchDetailHTML(url: string, jar: CookieJar) {
+  const u = url.endsWith("/") ? url : url + "/";
+  const res = await fetchWithJar(u, { headers: { "User-Agent": "Mozilla/5.0", "Accept": "text/html" } }, jar);
+  if (!res.ok) throw new Error(`Detail ${res.status}`);
+  return res.text();
 }
 
-// Build YYYYMM01 (first day of start month) for bookings endpoint
-function monthParamFromStart(start: string): string {
-  const dt = new Date(start + "T00:00:00Z");
-  const y = dt.getUTCFullYear().toString().padStart(4, "0");
-  const m = (dt.getUTCMonth() + 1).toString().padStart(2, "0");
-  return `${y}${m}01`;
+function extractId(html: string): number | null {
+  const m =
+    html.match(/inc_ajaxgetbookingsforsingleplace\.asp\?i=(\d+)/i) ||
+    html.match(/data-place-id\s*=\s*"(\d+)"/i) ||
+    html.match(/[?&]i=(\d+)/i);
+  const id = m ? Number(m[1]) : NaN;
+  return Number.isFinite(id) && !TYPE_IDS.has(id) ? id : null;
 }
 
-// Make a Set of booked dates from payload (union of BookingDates & PartialBookingDates)
-function toBookedSet(data: any): Set<string> {
-  const full = Array.isArray(data?.BookingDates) ? data.BookingDates : [];
-  const partial = Array.isArray(data?.PartialBookingDates) ? data.PartialBookingDates : [];
-  const all = [...full, ...partial].map((s: any) => String(s));
-  return new Set(all);
-}
-
-// Primary availability fetch: use slug (u=<slug>) with month param
-async function fetchBookedDatesBySlug(slug: string, yyyymm01: string, jar: CookieJar)
-: Promise<{ ok: boolean; dates?: Set<string>; raw?: any }> {
-  const headers = {
-    "User-Agent": "Mozilla/5.0",
-    "Accept": "application/json, text/javascript, */*;q=0.1",
-    "X-Requested-With": "XMLHttpRequest",
-    "Referer": `${BASE}/soeg/?s1=3012`,
-  };
-  const u = `${BOOK}?` + new URLSearchParams({ u: slug, d: yyyymm01 }).toString();
-  const r = await fetchWithJar(u, { headers }, jar);
-  if (!r.ok) return { ok: false };
-  const text = await r.text();
-  try {
-    const data = JSON.parse(text);
-    return { ok: true, dates: toBookedSet(data), raw: data };
-  } catch {
-    return { ok: false };
-  }
-}
-
-// Optional fallback: if a numeric place_id exists, try it second
-async function fetchBookedDatesById(id: number, yyyymm01: string, jar: CookieJar)
-: Promise<{ ok: boolean; dates?: Set<string>; raw?: any }> {
+// Bookings by numeric id (primary)
+async function fetchBookedById(id: number, yyyymm01: string, jar: CookieJar) {
   const headers = {
     "User-Agent": "Mozilla/5.0",
     "Accept": "application/json, text/javascript, */*;q=0.1",
@@ -190,17 +176,46 @@ async function fetchBookedDatesById(id: number, yyyymm01: string, jar: CookieJar
   };
   const u = `${BOOK}?` + new URLSearchParams({ i: String(id), d: yyyymm01 }).toString();
   const r = await fetchWithJar(u, { headers }, jar);
-  if (!r.ok) return { ok: false };
+  if (!r.ok) return { ok: false as const };
   const text = await r.text();
   try {
     const data = JSON.parse(text);
-    return { ok: true, dates: toBookedSet(data), raw: data };
+    return { ok: true as const, dates: toBookedSet(data), raw: data };
   } catch {
-    return { ok: false };
+    return { ok: false as const };
   }
 }
 
-/* ---------------- Handler ---------------- */
+// ---------------- In-memory cache (per warm instance)
+let ID_CACHE: Map<string, number> | null = null;
+let CACHE_BUILT_AT = 0;
+
+async function buildIdCache(jar: CookieJar, throttleMs = 70) {
+  const places = await fetchAllPlaces(jar);
+  const map = new Map<string, number>();
+  let extracted = 0;
+
+  for (const p of places) {
+    const slug = slugFromUrl(p.url);
+    if (!slug) continue;
+    try {
+      const html = await fetchDetailHTML(p.url, jar);
+      const id = extractId(html);
+      if (id) {
+        map.set(slug, id);
+        extracted++;
+      }
+    } catch {
+      // ignore
+    }
+    await new Promise(r => setTimeout(r, throttleMs));
+  }
+  ID_CACHE = map;
+  CACHE_BUILT_AT = Date.now();
+  return { count: places.length, extracted };
+}
+
+// ---------------- API Handler
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
     const start = String(req.query.start || "");
@@ -208,8 +223,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const regions = ([] as string[]).concat(req.query.region || []).filter(Boolean) as string[];
     const maxPlaces = Math.max(0, Number(req.query.maxPlaces || 0));
     const debug = String(req.query.debug || "") === "1";
+    const rebuildCache = String(req.query.rebuildCache || "") === "1";
 
-    // Make a cookie jar and warm it up (establish ASP session cookies)
+    // Warm cookies/session
     const jar = new CookieJar();
     try {
       const warm = await fetchWithJar(`${BASE}/soeg/?s1=3012`, {
@@ -220,133 +236,122 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       await new Promise(r => setTimeout(r, 80));
     } catch {}
 
-    /* ---------- Inspect mode: /api/search?inspect=1 ---------- */
+    // Cache control endpoints
     if (String(req.query.inspect || "") === "1") {
-      const list = await fetchAllPlaces(jar);
-      const pick =
-        list.find(p => p.url.includes("aaby-skoven")) || // stable example
-        list[0];
-
-      if (!pick) {
-        return res.status(200).json({
-          inspect: true,
-          debug: { note: "No places returned from list API – cannot inspect." }
-        });
-      }
-
-      const slug = slugFromUrl(pick.url);
-      let slugProbe: any = null;
-      if (slug) {
-        try {
-          const probe = await fetchBookedDatesBySlug(slug, "20250901", jar);
-          slugProbe = probe.ok
-            ? { ok: true, datesCount: probe.dates!.size, sample: Array.from(probe.dates!).slice(0, 5), rawKeys: Object.keys(probe.raw || {}) }
-            : { ok: false };
-        } catch (e: any) {
-          slugProbe = { error: e?.message || String(e) };
-        }
-      }
-
       return res.status(200).json({
-        inspect: true,
-        testing: pick.url,
-        slug,
-        cookie_header: jar.header(),
-        slug_probe: slugProbe,
+        cachePresent: !!ID_CACHE,
+        cacheSize: ID_CACHE?.size ?? 0,
+        cacheAgeSec: ID_CACHE ? Math.round((Date.now() - CACHE_BUILT_AT) / 1000) : null,
       });
     }
-    /* ---------- End inspect mode ---------- */
+    if (rebuildCache) {
+      const result = await buildIdCache(jar, 60);
+      return res.status(200).json({
+        cacheRebuilt: true,
+        ...result,
+        cacheSize: ID_CACHE?.size ?? 0,
+      });
+    }
 
     if (!/^\d{4}-\d{2}-\d{2}$/.test(start)) {
       return res.status(400).json({ error: "start must be YYYY-MM-DD" });
     }
 
-    // Build required-free dates for the specific stay
+    // Required-free dates for the stay
     const needs: string[] = [];
     const base = new Date(start + "T00:00:00Z");
     for (let i = 0; i < nights; i++) {
-      const d = new Date(base); d.setUTCDate(d.getUTCDate() + i);
+      const d = new Date(base);
+      d.setUTCDate(d.getUTCDate() + i);
       needs.push(d.toISOString().slice(0, 10));
     }
-
-    // IMPORTANT: the bookings endpoint wants the *month* (YYYYMM01)
     const monthParam = monthParamFromStart(start);
 
-    // 1) list all places
-    const allPlaces = await fetchAllPlaces(jar);
-    let places = allPlaces;
+    // 1) all places
+    const all = await fetchAllPlaces(jar);
 
-    // 2) region filters (bounding boxes; supports multiple & aliases)
+    // 2) region filtering
     const keys = regions.map(resolveRegionName).filter(Boolean) as string[];
-    if (keys.length) {
-      places = places.filter(p => {
-        if (p.lat == null || p.lng == null) return false;
-        return keys.some(k => {
-          const [latMin, latMax, lonMin, lonMax] = PRESETS[k];
-          const ok = p.lat! >= latMin && p.lat! <= latMax && p.lng! >= lonMin && p.lng! <= lonMax;
-          if (ok && !p.region) p.region = k;
-          return ok;
-        });
-      });
-    }
+    let places = keys.length
+      ? all.filter(p => {
+          if (p.lat == null || p.lng == null) return false;
+          return keys.some(k => {
+            const [latMin, latMax, lonMin, lonMax] = PRESETS[k];
+            const ok = p.lat! >= latMin && p.lat! <= latMax && p.lng! >= lonMin && p.lng! <= lonMax;
+            if (ok && !p.region) p.region = k;
+            return ok;
+          });
+        })
+      : all;
 
     if (maxPlaces > 0) places = places.slice(0, maxPlaces);
 
-    // 3) availability by slug (primary), with optional id fallback
+    // 3) ensure ID cache exists
+    if (!ID_CACHE) {
+      await buildIdCache(jar, 60); // first search will build the map
+    }
+
+    // 4) availability by numeric id
     const available: any[] = [];
-    let availChecked = 0, availErrors = 0, usedSlug = 0, usedId = 0;
+    let availChecked = 0, availErrors = 0, resolvedFromCache = 0, resolvedByScrape = 0;
 
     for (const p of places) {
       const slug = slugFromUrl(p.url);
-      let got = { ok: false, dates: undefined as Set<string> | undefined };
+      let id: number | null = null;
 
-      try {
-        if (slug) {
-          const r1 = await fetchBookedDatesBySlug(slug, monthParam, jar);
-          if (r1.ok) { got = { ok: true, dates: r1.dates! }; usedSlug++; }
-        }
-        if (!got.ok && p.place_id) {
-          const r2 = await fetchBookedDatesById(p.place_id, monthParam, jar);
-          if (r2.ok) { got = { ok: true, dates: r2.dates! }; usedId++; }
-        }
-      } catch {
-        // ignore; counted below
+      if (slug && ID_CACHE?.has(slug)) {
+        id = ID_CACHE.get(slug)!;
+        resolvedFromCache++;
+      } else if (slug) {
+        // On-the-fly resolve & inject into cache
+        try {
+          const html = await fetchDetailHTML(p.url, jar);
+          const got = extractId(html);
+          if (got) {
+            id = got;
+            ID_CACHE?.set(slug, got);
+            resolvedByScrape++;
+          }
+        } catch {}
+        await new Promise(r => setTimeout(r, 50));
       }
 
-      if (!got.ok) {
-        availErrors++;
-      } else {
+      if (!id) continue;
+
+      try {
+        const r = await fetchBookedById(id, monthParam, jar);
+        if (!r.ok) { availErrors++; continue; }
         availChecked++;
-        const booked = got.dates!;
+        const booked = r.dates!;
         const overlaps = needs.some(d => booked.has(d));
         if (!overlaps) {
           available.push({
             lat: p.lat, lng: p.lng, region: p.region,
-            name: p.title, url: p.url, place_id: p.place_id ?? null,
+            name: p.title, url: p.url, place_id: id,
           });
         }
+      } catch {
+        availErrors++;
       }
-
-      // polite delay to avoid hammering the site
-      await new Promise(r => setTimeout(r, 70));
+      await new Promise(r => setTimeout(r, 70)); // polite
     }
 
     const payload: any = { count: available.length, items: available };
     if (debug) {
       payload.debug = {
-        totalFetched: allPlaces.length,
+        totalFetched: all.length,
         afterRegionFilter: places.length,
-        monthParam,
         needs,
+        monthParam,
         availChecked,
         availErrors,
-        usedSlug,
-        usedId,
+        cacheSize: ID_CACHE?.size ?? 0,
+        resolvedFromCache,
+        resolvedByScrape,
+        cacheAgeSec: Math.round((Date.now() - CACHE_BUILT_AT) / 1000),
         sample: places.slice(0, 5).map(p => ({
-          title: p.title, url: p.url, place_id: p.place_id,
-          lat: p.lat, lng: p.lng, region: p.region
+          title: p.title, url: p.url, lat: p.lat, lng: p.lng, region: p.region
         })),
-        cookieHeader: jar.header(),
       };
     }
 
