@@ -31,6 +31,7 @@ const PRESETS: Record<string, [number, number, number, number]> = {
   amager: [55.55, 55.75, 12.45, 12.75],
 };
 
+// ASCII/english aliases -> canonical preset key
 const ALIAS: Record<string, string> = {
   sjaelland: "sjælland", zealand: "sjælland", sjalland: "sjælland",
   fyn: "fyn", funen: "fyn",
@@ -146,8 +147,13 @@ function slugFromUrl(url: string) {
   return m ? m[1] : null;
 }
 
-/** Try numeric place_id first; if missing/fails, try slug fallback. */
-async function fetchBookedDatesFlex(place: { place_id: number | null; url: string }, yyyymmdd: string): Promise<Set<string>> {
+/** Try numeric place_id first; if missing/fails, try slug fallback.
+ *  Returns {ok:true, dates:Set} ONLY when we actually parsed JSON with BookingDates.
+ */
+async function fetchBookedDatesFlex(
+  place: { place_id: number | null; url: string },
+  yyyymmdd: string
+): Promise<{ ok: boolean; dates?: Set<string> }> {
   const headers = {
     "User-Agent": "Mozilla/5.0",
     "Accept": "application/json, text/javascript, */*;q=0.1",
@@ -163,12 +169,13 @@ async function fetchBookedDatesFlex(place: { place_id: number | null; url: strin
       const text = await r.text();
       try {
         const data = JSON.parse(text);
-        return new Set((data?.BookingDates ?? []).map((s: any) => String(s)));
+        const arr = Array.isArray(data?.BookingDates) ? data.BookingDates : [];
+        return { ok: true, dates: new Set(arr.map((s: any) => String(s))) };
       } catch {}
     }
   }
 
-  // 2) slug fallback
+  // 2) slug fallback (may not be supported on their backend, but try)
   const slug = slugFromUrl(place.url);
   if (slug) {
     const u2 = `${BOOK}?` + new URLSearchParams({ u: slug, d: yyyymmdd }).toString();
@@ -177,12 +184,16 @@ async function fetchBookedDatesFlex(place: { place_id: number | null; url: strin
       const text2 = await r2.text();
       try {
         const data2 = JSON.parse(text2);
-        return new Set((data2?.BookingDates ?? []).map((s: any) => String(s)));
+        if (data2 && "BookingDates" in data2) {
+          const arr = Array.isArray(data2.BookingDates) ? data2.BookingDates : [];
+          return { ok: true, dates: new Set(arr.map((s: any) => String(s))) };
+        }
       } catch {}
     }
   }
 
-  return new Set();
+  // No supported response → soft fail
+  return { ok: false };
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -196,6 +207,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     if (!/^\d{4}-\d{2}-\d{2}$/.test(start)) {
       return res.status(400).json({ error: "start must be YYYY-MM-DD" });
     }
+
+    // POLITE WARM-UP: some endpoints behave better after a normal page hit (sets cookies)
+    try {
+      await fetch(`${BASE}/soeg/?s1=3012`, {
+        headers: { "User-Agent": "Mozilla/5.0", "Accept": "text/html" },
+      });
+      await new Promise(r => setTimeout(r, 80));
+    } catch {}
 
     // required-free dates
     const needs: string[] = [];
@@ -243,17 +262,28 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
     const withPid = places.filter(p => p.place_id).length;
 
-    // 4) availability using flexible fetch
+    // 4) availability using flexible fetch (no false positives)
     const available: any[] = [];
     let availChecked = 0, availErrors = 0;
     for (const p of places) {
       try {
-        const booked = await fetchBookedDatesFlex(p, yyyymmdd);
-        // If we got ANY data back, count it as checked (even if empty)
+        const resp = await fetchBookedDatesFlex(p, yyyymmdd);
+        if (!resp.ok) {
+          // Can't confirm → skip (do not assume availability)
+          continue;
+        }
         availChecked++;
+        const booked = resp.dates!;
         const overlaps = needs.some(d => booked.has(d));
         if (!overlaps) {
-          available.push({ lat: p.lat, lng: p.lng, region: p.region, name: p.title, url: p.url, place_id: p.place_id });
+          available.push({
+            lat: p.lat,
+            lng: p.lng,
+            region: p.region,
+            name: p.title,
+            url: p.url,
+            place_id: p.place_id,
+          });
         }
       } catch (e: any) {
         availErrors++;
