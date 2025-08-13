@@ -141,6 +141,44 @@ function extractId(html: string): number | null {
   return null;
 }
 
+function slugFromUrl(url: string) {
+  const m = url.match(/\/sted\/([^/]+)\//i);
+  return m ? m[1] : null;
+}
+
+async function fetchBookedDatesFlex(place: { place_id: number | null; url: string }, yyyymmdd: string): Promise<Set<string>> {
+  const headers = {
+    "User-Agent": "Mozilla/5.0",
+    Accept: "application/json, text/javascript, */*;q=0.1",
+    "X-Requested-With": "XMLHttpRequest",
+    Referer: `${BASE}/soeg/?s1=3012`,
+  };
+
+  // Try numeric place_id first
+  if (place.place_id) {
+    const u = `${BOOK}?` + new URLSearchParams({ i: String(place.place_id), d: yyyymmdd }).toString();
+    const r = await fetch(u, { headers });
+    if (r.ok) {
+      const text = await r.text();
+      const data = JSON.parse(text);
+      return new Set((data?.BookingDates ?? []).map((s: any) => String(s)));
+    }
+  }
+
+  // Fallback to slug if no ID or failed
+  const slug = slugFromUrl(place.url);
+  if (slug) {
+    const u2 = `${BOOK}?` + new URLSearchParams({ u: slug, d: yyyymmdd }).toString();
+    const r2 = await fetch(u2, { headers });
+    if (r2.ok) {
+      const text2 = await r2.text();
+      const data2 = JSON.parse(text2);
+      return new Set((data2?.BookingDates ?? []).map((s: any) => String(s)));
+    }
+  }
+
+  return new Set();
+}
 
 async function fetchBookedDates(id: number, yyyymmdd: string): Promise<Set<string>> {
   const data = await getJSON(BOOK, { i: String(id), d: yyyymmdd });
@@ -217,7 +255,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     for (const p of places) {
       if (!p.place_id) continue;
       try {
-        const booked = await fetchBookedDates(p.place_id, yyyymmdd);
+        const booked = await fetchBookedDatesFlex(p, yyyymmdd);
         availChecked++;
         const overlaps = needs.some(d => booked.has(d));
         if (!overlaps) {
