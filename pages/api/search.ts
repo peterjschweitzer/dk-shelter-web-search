@@ -1,250 +1,73 @@
 // pages/api/search.ts
 import type { NextApiRequest, NextApiResponse } from "next";
 
-// Force dynamic so Vercel doesn't cache results
-export const dynamic = "force-dynamic";
-// Ensure Node.js runtime (not Edge)
-export const runtime = "nodejs";
-
-type Place = {
+type Shelter = {
   title: string;
   url: string;
-  place_id: number | null;
-  lat: number | null;
-  lng: number | null;
-  region: string;
+  lat: number;
+  lng: number;
+  region?: string;
 };
-
-const BASE = "https://book.naturstyrelsen.dk";
-const LIST = `${BASE}/includes/branding_files/shelterbooking/includes/inc_ajaxbookingplaces.asp`;
-const BOOK = `${BASE}/includes/branding_files/shelterbooking/includes/inc_ajaxgetbookingsforsingleplace.asp`;
-
-// Type/category ids (NOT real place ids)
-const TYPE_IDS = new Set([3012, 3031, 3091]);
-
-// Region presets (lat_min, lat_max, lon_min, lon_max)
-const PRESETS: Record<string, [number, number, number, number]> = {
-  "sjælland": [54.60, 55.95, 11.00, 12.80],
-  fyn: [55.0, 55.6, 9.6, 10.8],
-  jylland: [54.55, 57.8, 8.0, 10.6],
-  bornholm: [55.0, 55.4, 14.6, 15.3],
-  "lolland-falster": [54.5, 54.95, 11.05, 12.3],
-  "møn": [54.85, 55.08, 12.15, 12.6],
-  amager: [55.55, 55.75, 12.45, 12.75],
-};
-
-// ASCII/english aliases -> canonical preset key
-const REGION_ALIAS: Record<string, string> = {
-  sjaelland: "sjælland",
-  zealand: "sjælland",
-  sjalland: "sjælland",
-  fyn: "fyn",
-  funen: "fyn",
-  jylland: "jylland",
-  jutland: "jylland",
-  jyland: "jylland",
-  bornholm: "bornholm",
-  lolland: "lolland-falster",
-  falster: "lolland-falster",
-  lollandfalster: "lolland-falster",
-  moen: "møn",
-  mon: "møn",
-  "møn": "møn",
-  amager: "amager",
-};
-
-function norm(s: string) {
-  return s
-    .toLowerCase()
-    .replace(/æ/g, "ae")
-    .replace(/ø/g, "oe")
-    .replace(/å/g, "aa")
-    .replace(/[\s_-]/g, "");
-}
-
-function resolveRegionName(input: string): string | null {
-  const raw = input.toLowerCase().trim();
-  if (PRESETS[raw]) return raw;
-  const n = norm(raw);
-  return REGION_ALIAS[n] ?? null;
-}
-
-async function getJSON(url: string, params: Record<string, string>) {
-  const u = url + "?" + new URLSearchParams(params).toString();
-  const r = await fetch(u, {
-    headers: {
-      "User-Agent": "Mozilla/5.0",
-      Accept: "application/json, text/javascript, */*; q=0.1",
-      "X-Requested-With": "XMLHttpRequest",
-      Referer: `${BASE}/soeg/?s1=3012`,
-    },
-  });
-  if (!r.ok) throw new Error(`${r.status} on ${u}`);
-  // Some endpoints respond with text/html but carry JSON
-  const text = await r.text();
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw new Error(`Non-JSON response from ${url}`);
-  }
-}
-
-async function fetchAllPlaces(): Promise<Place[]> {
-  const out: Place[] = [];
-  for (let p = 1; p <= 500; p++) {
-    const data = await getJSON(LIST, {
-      pid: "0",
-      p: String(p),
-      r: "50000",
-      ps: "200",
-      t: "1",
-    });
-    const rows = data?.BookingPlacesList ?? [];
-    if (!rows.length) break;
-    for (const c of rows) {
-      const uri = String(c.Uri || "").trim().replace(/^\/|\/$/g, "");
-      if (!uri) continue;
-      // Only trust PlaceID (not FTypeID etc.)
-      let placeId = Number(c.PlaceID ?? NaN);
-      if (!Number.isFinite(placeId) || TYPE_IDS.has(placeId)) placeId = NaN;
-      const lat = Number(c.DoubleLat ?? c.Lat ?? NaN);
-      const lng = Number(c.DoubleLng ?? c.Lng ?? NaN);
-      out.push({
-        title:
-          c.Title ||
-          uri
-            .replace(/-/g, " ")
-            .replace(/\b\w/g, (m: string) => m.toUpperCase()),
-        url: `${BASE}/sted/${uri}/`,
-        place_id: Number.isFinite(placeId) ? placeId : null,
-        lat: Number.isFinite(lat) ? lat : null,
-        lng: Number.isFinite(lng) ? lng : null,
-        region: c.RegionName || "",
-      });
-    }
-    if (rows.length < 200) break;
-    // small delay to be polite
-    await new Promise((r) => setTimeout(r, 120));
-  }
-  return out;
-}
-
-async function fetchDetailHTML(url: string) {
-  const u = url.endsWith("/") ? url : url + "/";
-  const r = await fetch(u, {
-    headers: { "User-Agent": "Mozilla/5.0" },
-  });
-  if (!r.ok) throw new Error(`Detail ${r.status}`);
-  return r.text();
-}
-
-function extractId(html: string): number | null {
-  const m =
-    html.match(/inc_ajaxgetbookingsforsingleplace\.asp\?i=(\d+)/i) ||
-    html.match(/data-place-id\s*=\s*"(\d+)"/i) ||
-    html.match(/[?&]i=(\d+)/i);
-  if (!m) return null;
-  const id = Number(m[1]);
-  return Number.isFinite(id) && !TYPE_IDS.has(id) ? id : null;
-}
-
-async function fetchBookedDates(id: number, yyyymmdd: string): Promise<Set<string>> {
-  const data = await getJSON(BOOK, { i: String(id), d: yyyymmdd });
-  const arr = data?.BookingDates ?? [];
-  return new Set(arr.map((s: any) => String(s)));
-}
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  const { start, nights, region } = req.query;
+
+  if (!start || !nights) {
+    res.status(400).json({ error: "Missing required query parameters: start, nights" });
+    return;
+  }
+
   try {
-    const start = String(req.query.start || "");
-    const nights = Math.max(1, Number(req.query.nights || 1));
-    const regionParams = ([] as string[])
-      .concat(req.query.region || [])
-      .filter(Boolean) as string[];
-    const maxPlaces = Math.max(0, Number(req.query.maxPlaces || 0));
+    // 1. Get shelter list from Naturstyrelsen API
+    const listUrl = "https://book.naturstyrelsen.dk/includes/branding_files/shelterbooking/includes/inc_ajaxbookingplaces.asp?pid=0&p=1&r=50000&ps=500&t=1";
+    const response = await fetch(listUrl);
+    const data = await response.json();
 
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(start)) {
-      return res.status(400).json({ error: "start must be YYYY-MM-DD" });
+    let places: Shelter[] = data.BookingPlacesList.map((p: any) => ({
+      title: p.Title,
+      url: `https://book.naturstyrelsen.dk/sted/${p.Uri}/`,
+      lat: parseFloat(p.Lat),
+      lng: parseFloat(p.Lng),
+      region: p.Region || "Unknown"
+    }));
+
+    // 2. Region filter (if requested)
+    if (region) {
+      const regionLower = String(region).toLowerCase();
+      places = places.filter(p => p.region?.toLowerCase().includes(regionLower));
     }
 
-    // Build list of night strings we need available
-    const needs: string[] = [];
-    {
-      const base = new Date(start + "T00:00:00Z");
-      for (let i = 0; i < nights; i++) {
-        const d = new Date(base);
-        d.setUTCDate(d.getUTCDate() + i);
-        needs.push(d.toISOString().slice(0, 10));
-      }
-    }
-    const yyyymmdd = start.replace(/-/g, "");
+    // 3. Availability check (for each place)
+    const startDate = String(start);
+    const needsDates = Array.from({ length: Number(nights) }, (_, i) => {
+      const d = new Date(startDate);
+      d.setDate(d.getDate() + i);
+      return d.toISOString().split("T")[0];
+    });
 
-    // 1) fetch all places
-    let places = await fetchAllPlaces();
+    const available: Shelter[] = [];
 
-    // 2) region filter (OR across multiple regions) using bbox presets
-    const resolvedRegions = regionParams
-      .map(resolveRegionName)
-      .filter(Boolean) as string[];
-
-    if (resolvedRegions.length) {
-      places = places.filter((p) => {
-        if (p.lat == null || p.lng == null) return false;
-        return resolvedRegions.some((key) => {
-          const [latMin, latMax, lonMin, lonMax] = PRESETS[key];
-          const ok =
-            p.lat! >= latMin &&
-            p.lat! <= latMax &&
-            p.lng! >= lonMin &&
-            p.lng! <= lonMax;
-          if (ok && !p.region) p.region = key; // fill missing
-          return ok;
-        });
-      });
-    }
-
-    if (maxPlaces > 0) places = places.slice(0, maxPlaces);
-
-    // 3) resolve missing per-place IDs by scraping the detail page
-    for (const p of places) {
-      if (!p.place_id) {
-        try {
-          const html = await fetchDetailHTML(p.url);
-          const id = extractId(html);
-          if (id) p.place_id = id;
-        } catch {
-          // ignore and skip later
-        }
-        await new Promise((r) => setTimeout(r, 50));
-      }
-    }
-
-    // 4) availability checks
-    const available: any[] = [];
-    for (const p of places) {
-      if (!p.place_id) continue;
+    for (const place of places) {
       try {
-        const booked = await fetchBookedDates(p.place_id, yyyymmdd);
-        const overlaps = needs.some((d) => booked.has(d));
-        if (!overlaps) {
-          available.push({
-            lat: p.lat,
-            lng: p.lng,
-            region: p.region,
-            name: p.title,
-            url: p.url,
-            place_id: p.place_id,
-          });
+        const availUrl = `https://book.naturstyrelsen.dk/includes/branding_files/shelterbooking/includes/inc_ajaxbookingcal.asp?pid=${place.url.split("/sted/")[1]}&year=${startDate.split("-")[0]}&month=${startDate.split("-")[1]}`;
+        const calRes = await fetch(availUrl);
+        const calData = await calRes.json();
+
+        // If none of the needsDates are booked, mark available
+        const bookedDates = calData.BookingCalList.map((d: any) => d.Date);
+        const isAvailable = needsDates.every(date => !bookedDates.includes(date));
+
+        if (isAvailable) {
+          available.push(place);
         }
-      } catch {
-        // ignore errors per place
+      } catch (err) {
+        console.error(`Error checking ${place.title}:`, err);
       }
-      await new Promise((r) => setTimeout(r, 80));
     }
 
-    res.setHeader("Cache-Control", "no-store");
-    return res.status(200).json({ count: available.length, items: available });
-  } catch (e: any) {
-    return res.status(500).json({ error: e?.message || "server error" });
+    res.status(200).json({ results: available });
+  } catch (error) {
+    console.error("Search error:", error);
+    res.status(500).json({ error: "Internal server error" });
   }
 }
