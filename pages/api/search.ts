@@ -195,8 +195,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     for (const p of places) {
       if (!p.place_id) {
         try {
-          const html = await fetchDetailHTML(p.url);
-          const id = extractId(html);
+          const html = await fetchDetailHTMLAll(p.url);
+          const id = html ? extractId(html) : null;
           if (id) {
             p.place_id = id;
             resolved++;
