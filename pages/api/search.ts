@@ -31,7 +31,6 @@ const PRESETS: Record<string, [number, number, number, number]> = {
   amager: [55.55, 55.75, 12.45, 12.75],
 };
 
-// ASCII/english aliases -> canonical preset key
 const ALIAS: Record<string, string> = {
   sjaelland: "sjælland", zealand: "sjælland", sjalland: "sjælland",
   fyn: "fyn", funen: "fyn",
@@ -51,28 +50,69 @@ function resolveRegionName(q: string) {
   return ALIAS[n] ?? null;
 }
 
-async function getJSON(url: string, params: Record<string, string>) {
+/* ---------------- Cookie jar helpers ---------------- */
+
+class CookieJar {
+  private jar = new Map<string, string>();
+  addFromSetCookieLine(line: string) {
+    // take first "name=value" part before ';'
+    const first = line.split(";")[0];
+    const eq = first.indexOf("=");
+    if (eq > 0) {
+      const name = first.slice(0, eq).trim();
+      const value = first.slice(eq + 1).trim();
+      if (name) this.jar.set(name, value);
+    }
+  }
+  addFromResponse(res: Response) {
+    const anyHeaders: any = res.headers as any;
+    const arr: string[] =
+      (typeof anyHeaders?.getSetCookie === "function" ? anyHeaders.getSetCookie() : null) ||
+      (res.headers.get("set-cookie") ? [res.headers.get("set-cookie") as string] : []);
+    for (const line of arr) this.addFromSetCookieLine(line);
+  }
+  header(): string | undefined {
+    if (this.jar.size === 0) return undefined;
+    return Array.from(this.jar.entries())
+      .map(([k, v]) => `${k}=${v}`)
+      .join("; ");
+  }
+}
+
+async function fetchWithJar(url: string, init: RequestInit, jar: CookieJar, collect = true) {
+  const headers = new Headers(init.headers as any);
+  const cookie = jar.header();
+  if (cookie) headers.set("Cookie", cookie);
+  const res = await fetch(url, { ...init, headers });
+  if (collect) jar.addFromResponse(res);
+  return res;
+}
+
+/* ---------------- Network helpers ---------------- */
+
+async function getJSON(url: string, params: Record<string, string>, jar?: CookieJar) {
   const u = url + "?" + new URLSearchParams(params).toString();
-  const r = await fetch(u, {
-    headers: {
-      "User-Agent": "Mozilla/5.0",
-      "Accept": "application/json, text/javascript, */*;q=0.1",
-      "Accept-Language": "da-DK,da;q=0.9,en-US;q=0.8",
-      "Cache-Control": "no-cache",
-      "Pragma": "no-cache",
-      "X-Requested-With": "XMLHttpRequest",
-      "Referer": `${BASE}/soeg/?s1=3012`,
-    },
-  });
-  if (!r.ok) throw new Error(`${r.status} on ${u}`);
-  const text = await r.text(); // sometimes served as text/html
+  const baseHeaders = {
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "application/json, text/javascript, */*;q=0.1",
+    "Accept-Language": "da-DK,da;q=0.9,en-US;q=0.8",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "X-Requested-With": "XMLHttpRequest",
+    "Referer": `${BASE}/soeg/?s1=3012`,
+  } as Record<string, string>;
+  const res = jar
+    ? await fetchWithJar(u, { headers: baseHeaders }, jar)
+    : await fetch(u, { headers: baseHeaders });
+  if (!res.ok) throw new Error(`${res.status} on ${u}`);
+  const text = await res.text(); // sometimes served as text/html
   return JSON.parse(text);
 }
 
-async function fetchAllPlaces(): Promise<Place[]> {
+async function fetchAllPlaces(jar: CookieJar): Promise<Place[]> {
   const out: Place[] = [];
   for (let p = 1; p <= 500; p++) {
-    const data = await getJSON(LIST, { pid: "0", p: String(p), r: "50000", ps: "200", t: "1" });
+    const data = await getJSON(LIST, { pid: "0", p: String(p), r: "50000", ps: "200", t: "1" }, jar);
     const rows = data?.BookingPlacesList ?? [];
     if (!rows.length) break;
     for (const c of rows) {
@@ -97,25 +137,30 @@ async function fetchAllPlaces(): Promise<Place[]> {
   return out;
 }
 
-/** Try multiple variants to get the real page markup. */
-async function fetchDetailHTMLAll(url: string): Promise<string | null> {
+/** Try multiple variants to get the real page markup, WITH COOKIES. */
+async function fetchDetailHTMLAll(url: string, jar: CookieJar): Promise<string | null> {
   const base = url.endsWith("/") ? url : url + "/";
   const candidates = [
     base,
     base + "?noheadfoot=true",
   ];
   for (const u of candidates) {
-    const r = await fetch(u, {
-      headers: {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "da-DK,da;q=0.9,en-US;q=0.8",
-        "Cache-Control": "no-cache",
+    const res = await fetchWithJar(
+      u,
+      {
+        headers: {
+          "User-Agent": "Mozilla/5.0",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "da-DK,da;q=0.9,en-US;q=0.8",
+          "Cache-Control": "no-cache",
+          "Referer": `${BASE}/soeg/?s1=3012`,
+        },
+        redirect: "follow",
       },
-      redirect: "follow",
-    });
-    if (r.ok) {
-      const html = await r.text();
+      jar
+    );
+    if (res.ok) {
+      const html = await res.text();
       if (html && html.length > 500) return html;
     }
   }
@@ -152,7 +197,8 @@ function slugFromUrl(url: string) {
  */
 async function fetchBookedDatesFlex(
   place: { place_id: number | null; url: string },
-  yyyymmdd: string
+  yyyymmdd: string,
+  jar: CookieJar
 ): Promise<{ ok: boolean; dates?: Set<string> }> {
   const headers = {
     "User-Agent": "Mozilla/5.0",
@@ -164,7 +210,7 @@ async function fetchBookedDatesFlex(
   // 1) numeric id
   if (place.place_id) {
     const u = `${BOOK}?` + new URLSearchParams({ i: String(place.place_id), d: yyyymmdd }).toString();
-    const r = await fetch(u, { headers });
+    const r = await fetchWithJar(u, { headers }, jar);
     if (r.ok) {
       const text = await r.text();
       try {
@@ -179,7 +225,7 @@ async function fetchBookedDatesFlex(
   const slug = slugFromUrl(place.url);
   if (slug) {
     const u2 = `${BOOK}?` + new URLSearchParams({ u: slug, d: yyyymmdd }).toString();
-    const r2 = await fetch(u2, { headers });
+    const r2 = await fetchWithJar(u2, { headers }, jar);
     if (r2.ok) {
       const text2 = await r2.text();
       try {
@@ -208,11 +254,15 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(400).json({ error: "start must be YYYY-MM-DD" });
     }
 
-    // POLITE WARM-UP: some endpoints behave better after a normal page hit (sets cookies)
+    // POLITE WARM-UP (sets cookies)
+    const jar = new CookieJar();
     try {
-      await fetch(`${BASE}/soeg/?s1=3012`, {
+      const warm = await fetchWithJar(`${BASE}/soeg/?s1=3012`, {
         headers: { "User-Agent": "Mozilla/5.0", "Accept": "text/html" },
-      });
+        redirect: "follow",
+      }, jar);
+      // collect warmup cookies
+      jar.addFromResponse(warm);
       await new Promise(r => setTimeout(r, 80));
     } catch {}
 
@@ -226,7 +276,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const yyyymmdd = start.replace(/-/g, "");
 
     // 1) list all places
-    const allPlaces = await fetchAllPlaces();
+    const allPlaces = await fetchAllPlaces(jar);
     let places = allPlaces;
 
     // 2) region filter via bounding boxes
@@ -245,13 +295,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     if (maxPlaces > 0) places = places.slice(0, maxPlaces);
 
-    // 3) resolve missing per-place ids by scraping (more robust)
+    // 3) resolve missing per-place ids by scraping (cookie-aware)
     let hadPid = places.filter(p => p.place_id).length;
     let resolved = 0;
     for (const p of places) {
       if (!p.place_id) {
         try {
-          const html = await fetchDetailHTMLAll(p.url);
+          const html = await fetchDetailHTMLAll(p.url, jar);
           const id = html ? extractId(html) : null;
           if (id) { p.place_id = id; resolved++; }
         } catch (err: any) {
@@ -267,10 +317,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     let availChecked = 0, availErrors = 0;
     for (const p of places) {
       try {
-        const resp = await fetchBookedDatesFlex(p, yyyymmdd);
+        const resp = await fetchBookedDatesFlex(p, yyyymmdd, jar);
         if (!resp.ok) {
-          // Can't confirm → skip (do not assume availability)
-          continue;
+          continue; // can't confirm → skip
         }
         availChecked++;
         const booked = resp.dates!;
@@ -305,6 +354,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         sample: places.slice(0, 5).map(p => ({
           title: p.title, url: p.url, place_id: p.place_id, lat: p.lat, lng: p.lng, region: p.region
         })),
+        cookieHeader: (jar as any)?.header?.(),
       };
     }
 
