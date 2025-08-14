@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
-export type RegionKey = 
+export type RegionKey =
   | "sjælland"
   | "fyn"
   | "jylland"
@@ -8,6 +8,16 @@ export type RegionKey =
   | "lolland-falster"
   | "møn"
   | "amager";
+
+export const REGION_KEYS: RegionKey[] = [
+  "sjælland",
+  "fyn",
+  "jylland",
+  "bornholm",
+  "lolland-falster",
+  "møn",
+  "amager",
+];
 
 const REGION_OPTIONS: { key: RegionKey; label: string }[] = [
   { key: "sjælland", label: "Sjælland" },
@@ -20,13 +30,9 @@ const REGION_OPTIONS: { key: RegionKey; label: string }[] = [
 ];
 
 export type RegionSelectProps = {
-  /** Controlled selected regions (keys) */
   value: RegionKey[];
-  /** Called with new selection whenever it changes */
   onChange: (next: RegionKey[]) => void;
-  /** Optional: extra class name for the wrapper */
   className?: string;
-  /** Optional: disable interaction */
   disabled?: boolean;
 };
 
@@ -39,7 +45,6 @@ export default function RegionSelect({
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
-  // Close on click outside
   useEffect(() => {
     function onDocClick(e: MouseEvent) {
       if (!ref.current) return;
@@ -55,7 +60,7 @@ export default function RegionSelect({
   const buttonLabel = useMemo(() => {
     if (noneSelected || allSelected) return "All regions";
     if (value.length === 1) {
-      const one = REGION_OPTIONS.find(o => o.key === value[0]);
+      const one = REGION_OPTIONS.find((o) => o.key === value[0]);
       return one?.label ?? "1 region selected";
     }
     return `${value.length} regions selected`;
@@ -63,7 +68,7 @@ export default function RegionSelect({
 
   function toggleAll() {
     if (allSelected) onChange([]);
-    else onChange(REGION_OPTIONS.map(o => o.key));
+    else onChange(REGION_OPTIONS.map((o) => o.key));
   }
 
   function toggleOne(k: RegionKey) {
@@ -78,7 +83,7 @@ export default function RegionSelect({
       <button
         type="button"
         disabled={disabled}
-        onClick={() => setOpen(o => !o)}
+        onClick={() => setOpen((o) => !o)}
         aria-haspopup="listbox"
         aria-expanded={open}
         className="px-3 py-2 rounded-lg border border-gray-300 text-sm bg-white hover:bg-gray-50"
@@ -96,13 +101,15 @@ export default function RegionSelect({
             <input
               type="checkbox"
               checked={allSelected || noneSelected}
-              aria-checked={allSelected ? "true" : noneSelected ? "mixed" : "false"}
+              aria-checked={
+                allSelected ? "true" : noneSelected ? "mixed" : "false"
+              }
               onChange={toggleAll}
             />
             <span>All regions</span>
           </label>
           <div className="my-1 h-px bg-gray-200" />
-          {REGION_OPTIONS.map(opt => {
+          {REGION_OPTIONS.map((opt) => {
             const checked = value.includes(opt.key);
             return (
               <label
