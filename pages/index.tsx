@@ -1,101 +1,79 @@
-// pages/index.tsx
 import { useState } from "react";
+import RegionSelect from "@/components/RegionSelect";
 
 export default function Home() {
+  const [query, setQuery] = useState("");
   const [start, setStart] = useState("");
   const [nights, setNights] = useState(1);
-  const [region, setRegion] = useState("");
-  const [maxPlaces, setMaxPlaces] = useState(120);
   const [results, setResults] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [regions, setRegions] = useState<Array<
+    "sjælland" | "fyn" | "jylland" | "bornholm" | "lolland-falster" | "møn" | "amager"
+  >>([]);
 
-  async function search() {
-    try {
-      setLoading(true);
-      setError(null);
-      const qs = new URLSearchParams({
-        start,
-        nights: String(nights),
-        maxPlaces: String(maxPlaces),
-      });
-      if (region.trim()) {
-        for (const r of region.split(",").map(s => s.trim()).filter(Boolean)) {
-          qs.append("region", r);
-        }
-      }
-      const res = await fetch(`/api/search?` + qs.toString());
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body?.error || `HTTP ${res.status}`);
-      }
-      const data = await res.json();
-      setResults(data.items || data.results || []);
-    } catch (e: any) {
-      setError(e?.message || "Search failed");
-    } finally {
-      setLoading(false);
-    }
-  }
+  const handleSearch = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+
+    const params = new URLSearchParams();
+    if (query) params.set("q", query);
+    if (start) params.set("start", start);
+    if (nights) params.set("nights", String(nights));
+    if (regions.length) params.set("region", regions.join(","));
+
+    const res = await fetch(`/api/search?${params.toString()}`);
+    const data = await res.json();
+    setResults(data.items || []);
+    setLoading(false);
+  };
 
   return (
-    <div style={{ padding: "2rem", fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif", maxWidth: 900, margin: "0 auto" }}>
-      <h1>DK Shelter Finder</h1>
-
-      <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", alignItems: "end" }}>
-        <label>
-          <div style={{ fontWeight: 600, marginBottom: 4 }}>Start date</div>
-          <input type="date" value={start} onChange={e => setStart(e.target.value)} />
-        </label>
-        <label>
-          <div style={{ fontWeight: 600, marginBottom: 4 }}>Nights</div>
-          <input type="number" min={1} value={nights} onChange={e => setNights(Number(e.target.value))} />
-        </label>
-        <label>
-          <div style={{ fontWeight: 600, marginBottom: 4 }}>Region(s) (optional)</div>
-          <input placeholder="e.g. sjaelland, fyn" value={region} onChange={e => setRegion(e.target.value)} />
-        </label>
-        <label>
-          <div style={{ fontWeight: 600, marginBottom: 4 }}>Max places (optional)</div>
-          <input type="number" min={0} value={maxPlaces} onChange={e => setMaxPlaces(Number(e.target.value))} />
-        </label>
-        <button onClick={search} disabled={loading || !start} style={{ padding: 10, borderRadius: 8 }}>
-          {loading ? "Searching…" : "Search"}
+    <main className="max-w-4xl mx-auto p-4">
+      <h1 className="text-2xl font-bold mb-4">DK Shelter Finder</h1>
+      <form onSubmit={handleSearch} className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+        <input
+          type="text"
+          placeholder="Search shelters..."
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          className="border rounded p-2"
+        />
+        <input
+          type="date"
+          value={start}
+          onChange={(e) => setStart(e.target.value)}
+          className="border rounded p-2"
+        />
+        <input
+          type="number"
+          min={1}
+          value={nights}
+          onChange={(e) => setNights(Number(e.target.value))}
+          className="border rounded p-2"
+        />
+        <RegionSelect value={regions} onChange={setRegions} />
+        <button
+          type="submit"
+          disabled={loading}
+          className="bg-blue-500 text-white rounded p-2 col-span-1 md:col-span-4"
+        >
+          {loading ? "Searching..." : "Search"}
         </button>
-      </div>
+      </form>
 
-      {error && <p style={{ color: "crimson", marginTop: 12 }}>Error: {error}</p>}
-
-      <p style={{ marginTop: 16 }}>
-        {results.length ? `Found ${results.length} available shelters.` : loading ? "Searching…" : ""}
-      </p>
-
-      {results.length > 0 && (
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr>
-              <th style={{ textAlign: "left", borderBottom: "1px solid #eee", padding: 8 }}>Name</th>
-              <th style={{ textAlign: "left", borderBottom: "1px solid #eee", padding: 8 }}>Region</th>
-              <th style={{ textAlign: "left", borderBottom: "1px solid #eee", padding: 8 }}>Lat</th>
-              <th style={{ textAlign: "left", borderBottom: "1px solid #eee", padding: 8 }}>Lng</th>
-              <th style={{ textAlign: "left", borderBottom: "1px solid #eee", padding: 8 }}>Link</th>
-            </tr>
-          </thead>
-          <tbody>
-            {results.map((r, i) => (
-              <tr key={i}>
-                <td style={{ padding: 8 }}>{r.name || r.title}</td>
-                <td style={{ padding: 8 }}>{r.region || ""}</td>
-                <td style={{ padding: 8 }}>{r.lat ?? ""}</td>
-                <td style={{ padding: 8 }}>{r.lng ?? ""}</td>
-                <td style={{ padding: 8 }}>
-                  <a href={r.url} target="_blank" rel="noreferrer">open</a>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      {results.length === 0 && !loading && (
+        <p className="text-gray-500">No results found</p>
       )}
-    </div>
+      <ul className="space-y-2">
+        {results.map((item) => (
+          <li key={item.url} className="border rounded p-2">
+            <a href={item.url} target="_blank" rel="noreferrer" className="font-semibold">
+              {item.title}
+            </a>
+            <p className="text-sm text-gray-600">{item.region}</p>
+          </li>
+        ))}
+      </ul>
+    </main>
   );
 }
