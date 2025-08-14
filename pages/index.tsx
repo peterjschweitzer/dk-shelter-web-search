@@ -1,6 +1,6 @@
 // pages/index.tsx
 import { useMemo, useState } from "react";
-import RegionSelect from "@/components/RegionSelect";
+import RegionSelect from "../components/RegionSelect";
 
 type ResultItem = {
   name: string;
