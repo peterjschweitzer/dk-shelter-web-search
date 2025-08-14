@@ -1,3 +1,4 @@
+// components/RegionSelect.tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
 export type RegionKey =
@@ -36,6 +37,41 @@ export type RegionSelectProps = {
   disabled?: boolean;
 };
 
+const btnStyle: React.CSSProperties = {
+  padding: "8px 12px",
+  borderRadius: 8,
+  border: "1px solid #d1d5db",
+  background: "#fff",
+  fontSize: 14,
+  cursor: "pointer",
+};
+const panelStyle: React.CSSProperties = {
+  position: "absolute",
+  top: "calc(100% + 8px)",
+  left: 0,
+  width: 260,
+  background: "#fff",
+  border: "1px solid #e5e7eb",
+  borderRadius: 12,
+  boxShadow: "0 8px 20px rgba(0,0,0,0.12)",
+  padding: 8,
+  zIndex: 1000,
+};
+const itemStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  padding: "8px",
+  borderRadius: 8,
+  cursor: "pointer",
+  userSelect: "none",
+};
+const dividerStyle: React.CSSProperties = {
+  height: 1,
+  background: "#e5e7eb",
+  margin: "4px 0",
+};
+
 export default function RegionSelect({
   value,
   onChange,
@@ -45,6 +81,7 @@ export default function RegionSelect({
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
+  // Close on outside click
   useEffect(() => {
     function onDocClick(e: MouseEvent) {
       if (!ref.current) return;
@@ -73,49 +110,43 @@ export default function RegionSelect({
 
   function toggleOne(k: RegionKey) {
     const set = new Set(value);
-    if (set.has(k)) set.delete(k);
-    else set.add(k);
+    set.has(k) ? set.delete(k) : set.add(k);
     onChange(Array.from(set));
   }
 
   return (
-    <div ref={ref} className={className} style={{ position: "relative" }}>
+    <div
+      ref={ref}
+      className={className}
+      style={{ position: "relative", display: "inline-block" }}
+    >
       <button
         type="button"
         disabled={disabled}
         onClick={() => setOpen((o) => !o)}
         aria-haspopup="listbox"
         aria-expanded={open}
-        className="px-3 py-2 rounded-lg border border-gray-300 text-sm bg-white hover:bg-gray-50"
+        style={btnStyle}
       >
         {buttonLabel} ▾
       </button>
 
       {open && (
-        <div
-          role="listbox"
-          aria-multiselectable="true"
-          className="absolute z-50 mt-2 w-64 rounded-xl border border-gray-200 bg-white shadow-lg p-2"
-        >
-          <label className="flex items-center gap-2 px-2 py-2 rounded-lg hover:bg-gray-50 cursor-pointer">
+        <div role="listbox" aria-multiselectable="true" style={panelStyle}>
+          <label style={itemStyle}>
             <input
               type="checkbox"
               checked={allSelected || noneSelected}
-              aria-checked={
-                allSelected ? "true" : noneSelected ? "mixed" : "false"
-              }
+              aria-checked={allSelected ? "true" : noneSelected ? "mixed" : "false"}
               onChange={toggleAll}
             />
             <span>All regions</span>
           </label>
-          <div className="my-1 h-px bg-gray-200" />
+          <div style={dividerStyle} />
           {REGION_OPTIONS.map((opt) => {
             const checked = value.includes(opt.key);
             return (
-              <label
-                key={opt.key}
-                className="flex items-center gap-2 px-2 py-2 rounded-lg hover:bg-gray-50 cursor-pointer"
-              >
+              <label key={opt.key} style={itemStyle}>
                 <input
                   type="checkbox"
                   checked={checked}
