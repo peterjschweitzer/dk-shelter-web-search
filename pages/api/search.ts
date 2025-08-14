@@ -1,31 +1,35 @@
 // pages/api/search.ts
 import type { NextApiRequest, NextApiResponse } from "next";
+import placeIdMap from "../../data/place_ids.json";
 
-// Let Next run this on the server (Node), not edge.
+// Server runtime
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// ---- Types
+// ---------- Region presets & helpers ----------
+type PlaceRow = {
+  Title: string;
+  Uri: string;
+  DoubleLat?: number | string;
+  DoubleLng?: number | string;
+  Lat?: number | string;
+  Lng?: number | string;
+};
+
 type Place = {
   title: string;
   url: string;
-  slug: string;
   place_id: number | null;
   lat: number | null;
   lng: number | null;
-  region: string; // will be set if matched by bbox
+  region: string;
 };
 
-// ---- Constants
 const BASE = "https://book.naturstyrelsen.dk";
 const LIST = `${BASE}/includes/branding_files/shelterbooking/includes/inc_ajaxbookingplaces.asp`;
 const BOOK = `${BASE}/includes/branding_files/shelterbooking/includes/inc_ajaxgetbookingsforsingleplace.asp`;
 
-// These are *category/type ids* that sometimes appear where a PlaceID should be.
-// We must never treat these as real place ids.
-const TYPE_IDS = new Set([3012, 3031, 3091]);
-
-// Region bounding boxes (latMin, latMax, lonMin, lonMax)
+// bounding boxes
 const PRESETS: Record<string, [number, number, number, number]> = {
   "sjælland": [54.60, 55.95, 11.00, 12.80],
   fyn: [55.0, 55.6, 9.6, 10.8],
@@ -36,242 +40,202 @@ const PRESETS: Record<string, [number, number, number, number]> = {
   amager: [55.55, 55.75, 12.45, 12.75],
 };
 
-// Aliases / diacritic-insensitive lookups
 const ALIAS: Record<string, string> = {
-  sjaelland: "sjælland",
-  zealand: "sjælland",
-  sjalland: "sjælland",
-  fyn: "fyn",
+  sjaelland: "sjælland", zealand: "sjælland", sjalland: "sjælland",
   funen: "fyn",
-  jylland: "jylland",
-  jutland: "jylland",
-  jyland: "jylland",
-  bornholm: "bornholm",
-  lolland: "lolland-falster",
-  falster: "lolland-falster",
-  lollandfalster: "lolland-falster",
-  moen: "møn",
-  mon: "møn",
-  "møn": "møn",
-  amager: "amager",
+  jutland: "jylland", jyland: "jylland",
+  lolland: "lolland-falster", falster: "lolland-falster", lollandfalster: "lolland-falster",
+  moen: "møn", mon: "møn",
 };
 
-function normKey(s: string) {
-  return s
-    .toLowerCase()
-    .replace(/æ/g, "ae")
-    .replace(/ø/g, "oe")
-    .replace(/å/g, "aa")
+function norm(s: string) {
+  return s.toLowerCase()
+    .replace(/æ/g, "ae").replace(/ø/g, "oe").replace(/å/g, "aa")
     .replace(/[\s_-]/g, "");
 }
-function resolveRegionName(q: string | null | undefined) {
+function resolveRegionName(q: string) {
   if (!q) return null;
   const ql = q.toLowerCase();
   if (PRESETS[ql]) return ql;
-  const n = normKey(q);
-  return ALIAS[n] ?? null;
+  return ALIAS[norm(q)] ?? null;
 }
 
-// ---- Load prebuilt slug → PlaceID map
-// Ensure tsconfig has: "resolveJsonModule": true
-import slugToIdRaw from "../../data/place_ids.json";
-const SLUG_TO_ID: Record<string, number> = slugToIdRaw as Record<string, number>;
+// ---------- ISO-8859-1 JSON fetcher ----------
+async function fetchJsonISO(url: string, params: Record<string, string>) {
+  const u = url + "?" + new URLSearchParams(params).toString();
+  const res = await fetch(u, {
+    headers: {
+      "User-Agent": "Mozilla/5.0",
+      Accept: "application/json, text/javascript, */*;q=0.1",
+      "X-Requested-With": "XMLHttpRequest",
+      Referer: `${BASE}/soeg/?s1=3012`,
+    },
+  });
+  if (!res.ok) throw new Error(`${res.status} on ${u}`);
 
-// ---- Helpers
-async function tolerantJSON<T = any>(resp: Response): Promise<T> {
-  const txt = await resp.text();
+  // Decode as ISO-8859-1 (Latin-1) to keep æ/ø/å intact.
+  const buf = await res.arrayBuffer();
+  const text = new TextDecoder("iso-8859-1").decode(buf);
+
+  // Some responses are labelled text/html; still JSON body.
   try {
-    return JSON.parse(txt);
+    return JSON.parse(text);
   } catch {
-    const m = txt.match(/\{[\s\S]*\}\s*$/);
-    if (!m) throw new Error("Bad JSON from endpoint");
-    return JSON.parse(m[0]);
+    // If there’s any stray padding, try to extract { ... } part.
+    const m = text.match(/\{[\s\S]*\}\s*$/);
+    if (m) return JSON.parse(m[0]);
+    throw new Error("Failed to parse JSON (ISO-8859-1)");
   }
 }
 
-async function fetchListPage(pageNum: number) {
-  const url = LIST + "?" + new URLSearchParams({
-    pid: "0",
-    p: String(pageNum),
-    r: "50000",
-    ps: "200",
-    t: "1",
-  }).toString();
-
-  const r = await fetch(url, {
-    headers: {
-      "User-Agent": "Mozilla/5.0",
-      "Accept": "application/json, text/javascript, */*;q=0.1",
-      "X-Requested-With": "XMLHttpRequest",
-      "Referer": `${BASE}/soeg/?s1=3012`,
-    },
-    // no-cache to keep things fresh
-    cache: "no-store",
-  });
-
-  if (!r.ok) throw new Error(`LIST ${r.status}`);
-  return tolerantJSON<any>(r);
-}
-
+// ---------- Data fetchers ----------
 async function fetchAllPlaces(): Promise<Place[]> {
   const out: Place[] = [];
-  for (let p = 1; p <= 999; p++) {
-    const data = await fetchListPage(p);
-    const rows = data?.BookingPlacesList ?? [];
+  for (let p = 1; p <= 500; p++) {
+    const data = await fetchJsonISO(LIST, {
+      pid: "0", p: String(p), r: "50000", ps: "200", t: "1",
+    });
+    const rows: PlaceRow[] = data?.BookingPlacesList ?? [];
     if (!rows.length) break;
 
     for (const c of rows) {
-      const uri: string = String(c.Uri || "").trim().replace(/^\/|\/$/g, "");
+      const uri = String(c.Uri || "").trim().replace(/^\/|\/$/g, "");
       if (!uri) continue;
-      const lat = Number(c.DoubleLat ?? c.Lat ?? NaN);
-      const lng = Number(c.DoubleLng ?? c.Lng ?? NaN);
-      const title: string =
-        c.Title ||
-        uri.replace(/-/g, " ").replace(/\b\w/g, (m: string) => m.toUpperCase());
 
-      // Use prebuilt ID map (critical!)
-      const placeId = SLUG_TO_ID[uri];
-      const place_id =
-        Number.isFinite(placeId) && !TYPE_IDS.has(placeId) ? placeId : null;
-
+      const lat = Number((c as any).DoubleLat ?? c.Lat ?? NaN);
+      const lng = Number((c as any).DoubleLng ?? c.Lng ?? NaN);
       out.push({
-        title,
+        title: String((c as any).Title || uri),
         url: `${BASE}/sted/${uri}/`,
-        slug: uri,
-        place_id,
+        place_id: (placeIdMap as Record<string, number | null>)[uri] ?? null,
         lat: Number.isFinite(lat) ? lat : null,
         lng: Number.isFinite(lng) ? lng : null,
         region: "",
       });
     }
-
     if (rows.length < 200) break;
-    await new Promise((r) => setTimeout(r, 110)); // polite pacing
+    await new Promise(r => setTimeout(r, 100));
   }
   return out;
 }
 
-async function fetchBookedDatesById(
-  id: number,
-  yyyymmdd: string
-): Promise<Set<string>> {
-  const params = new URLSearchParams({ i: String(id), d: yyyymmdd });
-  const r = await fetch(`${BOOK}?${params.toString()}`, {
-    headers: {
-      "User-Agent": "Mozilla/5.0",
-      "Accept": "application/json, text/javascript, */*;q=0.1",
-      "X-Requested-With": "XMLHttpRequest",
-      "Referer": `${BASE}/soeg/?s1=3012`,
-    },
-    cache: "no-store",
-  });
-  if (!r.ok) throw new Error(`BOOK ${r.status}`);
-  const data = await tolerantJSON<any>(r);
-  const arr = (data?.BookingDates ?? []) as any[];
+async function fetchBookedDatesById(placeId: number, monthYYYYMMDD: string): Promise<Set<string>> {
+  const data = await fetchJsonISO(BOOK, { i: String(placeId), d: monthYYYYMMDD });
+  const arr = data?.BookingDates ?? [];
   return new Set(arr.map((s: any) => String(s)));
 }
 
-// ---- API handler
+async function fetchBookedDatesBySlug(slug: string, monthYYYYMMDD: string): Promise<Set<string>> {
+  // some pages allow calling the endpoint without explicit id if Referer=place page
+  const u = BOOK + "?" + new URLSearchParams({ d: monthYYYYMMDD }).toString();
+  const res = await fetch(u, {
+    headers: {
+      "User-Agent": "Mozilla/5.0",
+      Accept: "application/json, text/javascript, */*;q=0.1",
+      "X-Requested-With": "XMLHttpRequest",
+      Referer: `${BASE}/sted/${slug}/`,
+    },
+  });
+  if (!res.ok) throw new Error(`slug lookup ${res.status}`);
+  const buf = await res.arrayBuffer();
+  const text = new TextDecoder("iso-8859-1").decode(buf);
+  const data = JSON.parse(text);
+  const arr = data?.BookingDates ?? [];
+  return new Set(arr.map((s: any) => String(s)));
+}
+
+// ---------- API handler ----------
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
     const start = String(req.query.start || "");
     const nights = Math.max(1, Number(req.query.nights || 1));
-    const maxPlaces = Math.max(0, Number(req.query.maxPlaces || 0));
-
-    // region may be single or multi
-    const regionsInput = ([] as string[]).concat(req.query.region || []).filter(Boolean) as string[];
-    const regionKeys = regionsInput
-      .map((r) => resolveRegionName(r))
+    const regionsQ = ([]
+      .concat(req.query.region as any || [])
+      .filter(Boolean) as string[])
+      .map(resolveRegionName)
       .filter(Boolean) as string[];
+
+    const maxPlaces = Math.max(0, Number(req.query.maxPlaces || 0));
 
     if (!/^\d{4}-\d{2}-\d{2}$/.test(start)) {
       return res.status(400).json({ error: "start must be YYYY-MM-DD" });
     }
 
-    // Dates to require free (exact night-by-night)
+    // build required date list
     const needs: string[] = [];
-    {
-      const base = new Date(start + "T00:00:00Z");
-      for (let i = 0; i < nights; i++) {
-        const d = new Date(base);
-        d.setUTCDate(d.getUTCDate() + i);
-        needs.push(d.toISOString().slice(0, 10));
-      }
+    const base = new Date(start + "T00:00:00Z");
+    for (let i = 0; i < nights; i++) {
+      const d = new Date(base); d.setUTCDate(d.getUTCDate() + i);
+      needs.push(d.toISOString().slice(0, 10));
     }
-    const yyyymmdd = start.replace(/-/g, ""); // any day in the target month works
+    const monthParam = start.slice(0, 7).replace("-", "") + "01"; // YYYYMM01
 
-    // 1) List all places
+    // 1) places
     let places = await fetchAllPlaces();
 
-    // 2) Optional region filter (via bounding boxes)
-    if (regionKeys.length) {
-      places = places.filter((p) => {
+    // 2) region filter
+    if (regionsQ.length) {
+      places = places.filter(p => {
         if (p.lat == null || p.lng == null) return false;
-        let hit = false;
-        for (const k of regionKeys) {
+        const ok = regionsQ.some(k => {
           const [latMin, latMax, lonMin, lonMax] = PRESETS[k];
-          const ok = p.lat >= latMin && p.lat <= latMax && p.lng >= lonMin && p.lng <= lonMax;
-          if (ok) {
-            p.region = k;
-            hit = true;
-            break;
-          }
-        }
-        return hit;
+          const inside = p.lat! >= latMin && p.lat! <= latMax && p.lng! >= lonMin && p.lng! <= lonMax;
+          if (inside) p.region = k;
+          return inside;
+        });
+        return ok;
       });
     }
 
     if (maxPlaces > 0) places = places.slice(0, maxPlaces);
 
-    // 3) Availability using *prebuilt IDs only*
-    let availChecked = 0;
-    let availErrors = 0;
-    const available: any[] = [];
-
+    // 3) availability
+    const items: any[] = [];
+    let usedId = 0, usedSlug = 0, availErrors = 0;
     for (const p of places) {
-      if (!p.place_id) continue; // skip if no id in the map
       try {
-        const booked = await fetchBookedDatesById(p.place_id, yyyymmdd);
-        const overlaps = needs.some((d) => booked.has(d));
+        let booked: Set<string>;
+        if (p.place_id) {
+          usedId++;
+          booked = await fetchBookedDatesById(p.place_id, monthParam);
+        } else {
+          usedSlug++;
+          const slug = p.url.replace(/^.+\/sted\/|\/$/g, "");
+          booked = await fetchBookedDatesBySlug(slug, monthParam);
+        }
+        const overlaps = needs.some(d => booked.has(d));
         if (!overlaps) {
-          available.push({
-            lat: p.lat,
-            lng: p.lng,
-            region: p.region,
+          items.push({
             name: p.title,
             url: p.url,
-            place_id: p.place_id,
+            lat: p.lat,
+            lng: p.lng,
+            region: p.region || "",
+            place_id: p.place_id ?? null,
           });
         }
-        availChecked++;
       } catch {
         availErrors++;
       }
-      // light pacing against their backend
-      await new Promise((r) => setTimeout(r, 75));
+      await new Promise(r => setTimeout(r, 60));
     }
 
-    // Debug payload to help you inspect behavior in prod
-    const debug = {
-      totalFetched: places.length + (maxPlaces > 0 ? 0 : 0),
-      afterRegionFilter: places.length,
-      needs,
-      yyyymmdd,
-      usedIdCount: places.filter((p) => p.place_id != null).length,
-      availChecked,
-      availErrors,
-      sample: places.slice(0, 5).map((p) => ({
-        title: p.title,
-        url: p.url,
-        place_id: p.place_id,
-        lat: p.lat,
-        lng: p.lng,
-        region: p.region,
-      })),
-    };
-
     res.setHeader("Cache-Control", "no-store");
-    return res.status(200).json({ count: available.length, items: available, debug });
+    return res.status(200).json({
+      count: items.length,
+      items,
+      debug: {
+        totalFetched: places.length,
+        afterRegionFilter: places.length,
+        monthParam,
+        needs,
+        availChecked: places.length,
+        availErrors,
+        usedId,
+        usedSlug,
+        placeIdCount: Object.keys(placeIdMap as Record<string, number>).length,
+      },
+    });
   } catch (e: any) {
     return res.status(500).json({ error: e?.message || "server error" });
   }
