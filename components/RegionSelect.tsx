@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
-type RegionKey =
+export type RegionKey = 
   | "sjælland"
   | "fyn"
   | "jylland"

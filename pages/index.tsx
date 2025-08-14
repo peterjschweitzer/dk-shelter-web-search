@@ -1,11 +1,11 @@
 import { useState } from "react";
-import RegionSelect from "@/components/RegionSelect";
+import RegionSelect, { RegionKey } from "../components/RegionSelect";
 
 export default function Home() {
   const [query, setQuery] = useState("");
   const [start, setStart] = useState("");
   const [nights, setNights] = useState(1);
-  const [results, setResults] = useState<any[]>([]);
+  const [results, setResults] = useState<RegionKey[]>([]);
   const [loading, setLoading] = useState(false);
   const [regions, setRegions] = useState<Array<
     "sjælland" | "fyn" | "jylland" | "bornholm" | "lolland-falster" | "møn" | "amager"
