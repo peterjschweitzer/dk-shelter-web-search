@@ -29,6 +29,10 @@ export default function Home() {
   const [results, setResults] = useState<ApiItem[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [debug, setDebug] = useState<any>(null);
+  const showDebug = false; // set to true locally if you want to see internals
+
+
+  const [selectedRegions, setSelectedRegions] = useState<RegionKey[]>([]);
 
   // Default date = today + 2 days (to avoid past-date timezone weirdness)
   useEffect(() => {
@@ -78,38 +82,34 @@ export default function Home() {
   }
 
   return (
-    <div style={{ maxWidth: 1100, margin: "30px auto", padding: "0 16px" }}>
-      <h1 style={{ fontSize: 40, marginBottom: 24 }}>DK Shelter Finder</h1>
+    <div style={{ maxWidth: 1200, margin: "0 auto", padding: "24px 16px" }}>
+      <h1 style={{ fontSize: 36, fontWeight: 800, marginBottom: 24 }}>DK Shelter Finder</h1>
 
+      {/* Form */}
       <form
         onSubmit={onSearch}
         style={{
           display: "grid",
-          gridTemplateColumns: "repeat(12, 1fr)",
-          gap: 16,
+          gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
+          gap: 32,
           alignItems: "end",
           marginBottom: 20,
         }}
       >
         {/* Start date */}
-        <div style={{ gridColumn: "span 4" }}>
-          <label style={{ display: "block", marginBottom: 6, fontWeight: 600 }}>
-            Start date
-          </label>
+        <div>
+          <label style={{ display: "block", fontWeight: 600, marginBottom: 6 }}>Start date</label>
           <input
             type="date"
             value={start}
             onChange={(e) => setStart(e.target.value)}
             style={inputStyle}
-            required
           />
         </div>
 
         {/* Nights */}
-        <div style={{ gridColumn: "span 2" }}>
-          <label style={{ display: "block", marginBottom: 6, fontWeight: 600 }}>
-            Nights
-          </label>
+        <div>
+          <label style={{ display: "block", fontWeight: 600, marginBottom: 6 }}>Nights</label>
           <input
             type="number"
             min={1}
@@ -120,34 +120,39 @@ export default function Home() {
         </div>
 
         {/* Max places */}
-        <div style={{ gridColumn: "span 3" }}>
-          <label style={{ display: "block", marginBottom: 6, fontWeight: 600 }}>
-            Max places (optional)
+        <div>
+          <label style={{ display: "block", fontWeight: 600, marginBottom: 6 }}>
+            Max places <span style={{ color: "#6b7280" }}>(optional)</span>
           </label>
           <input
             type="number"
-            min={1}
             placeholder="e.g. 100"
-            value={maxPlaces}
-            onChange={(e) => {
-              const v = e.target.value;
-              setMaxPlaces(v === "" ? "" : Number(v));
-            }}
+            value={maxPlaces === "" ? "" : maxPlaces}
+            onChange={(e) =>
+              setMaxPlaces(e.target.value === "" ? "" : Number(e.target.value))
+            }
             style={inputStyle}
           />
         </div>
 
         {/* Regions */}
-        <div style={{ gridColumn: "span 3" }}>
-          <label style={{ display: "block", marginBottom: 6, fontWeight: 600 }}>
-            Region(s) (optional)
+        <div>
+          <label style={{ display: "block", fontWeight: 600, marginBottom: 6 }}>
+            Region(s) <span style={{ color: "#6b7280" }}>(optional)</span>
           </label>
-          <RegionSelect value={regions} onChange={setRegions} />
+          <RegionSelect
+            value={regions}           // <-- use the state you serialize into the query
+            onChange={setRegions}     // <-- keep a single source of truth
+          />
         </div>
 
-        {/* Search button (full width row) */}
+        {/* Button spans full row on small screens */}
         <div style={{ gridColumn: "1 / -1" }}>
-          <button type="submit" style={btnStyle} disabled={loading}>
+          <button
+            type="submit"
+            disabled={loading}
+            style={btnStyle}
+          >
             {loading ? "Searching…" : "Search"}
           </button>
         </div>
@@ -203,20 +208,12 @@ export default function Home() {
       </div>
 
       {/* Debug (toggle-able if you like; for now show if present) */}
-      {debug && (
-        <pre
-          style={{
-            background: "#f6f7f9",
-            border: "1px solid #e5e7eb",
-            padding: 12,
-            borderRadius: 8,
-            marginTop: 16,
-            overflow: "auto",
-          }}
-        >
-{JSON.stringify(debug, null, 2)}
+      {showDebug && debug && (
+        <pre className="mx-auto max-w-6xl mt-6 rounded-xl border bg-gray-50 p-4 text-sm overflow-auto">
+          {JSON.stringify(debug, null, 2)}
         </pre>
       )}
+
     </div>
   );
 }
